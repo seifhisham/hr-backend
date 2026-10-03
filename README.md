@@ -1,118 +1,83 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# HR Backend
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+NestJS REST API for the HR dashboard and the later Flutter application. Uses SQLite, Zod request validation, and session authentication. See [API.md](API.md) for endpoint contracts and [the project BRD](../BRD.md) for business requirements.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Structure
 
-## Description
-
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
-
-```bash
-$ npm install
+```text
+src/
+  app.module.ts                 Application composition and global auth guard
+  main.ts                       Server startup and HTTP security headers
+  auth/                         Login, sessions, passwords, guard, request types
+  employees/                    Employee profiles and account provisioning
+  schedules/                    Working days, shifts, and grace periods
+  company/                      Company name and timezone settings
+  attendance/                   Attendance, reports, corrections, GPS/photo evidence
+  requests/                     Time-off and forgotten-check-out approval workflows
+  audit/                        Audited business changes and activity history
+  health/                       Public health endpoint
+  database/                     SQLite connection, schema, transactions, bootstrap
+  common/
+    decorators/                 Public-route metadata
+    security/                   Shared credential and role-check helpers
+    types/                      Authenticated actor contract
+    validation/                 Shared schemas, parsing, and Zod validation pipe
+test/
+  hr.e2e-spec.ts                Cross-feature REST and transaction regression tests
+  app.e2e-spec.ts               Root endpoint compatibility test
 ```
 
-## Compile and run the project
+Each business feature owns its `*.module.ts`, `*.controller.ts`, `*.service.ts`, `dto/`, and applicable `types/`. Unit tests live beside the implementation they exercise. Helpers such as attendance time calculations stay with their feature rather than becoming miscellaneous global utilities.
 
-```bash
-# development
-$ npm run start
+## Conventions
 
-# watch mode
-$ npm run start:dev
+- Controllers handle HTTP transport and delegate business rules to services. DTO schemas and inferred TypeScript types define request contracts; `ZodValidationPipe` validates JSON bodies before handler execution. Multipart attendance evidence has its own location/image validation.
+- Modules declare explicit imports and export only shared services. Providers are not registered repeatedly, and the module graph does not use circular `forwardRef` dependencies.
+- `AuthGuard` is registered through `APP_GUARD`: routes are protected by default. `@Public()` is reserved for intentional public endpoints. Role and ownership checks remain in services, including cross-feature operations.
+- `DatabaseModule` owns the single SQLite connection and synchronous transaction helper. Bootstrap creates initial settings, schedules, and the administrator only when missing. The existing schema, database path, credentials, and REST contracts are unchanged.
+- Services currently execute prepared SQLite statements directly. An ORM or generic repository layer is not required for this small system. Do not duplicate the connection or introduce another persistence implementation without a separate migration plan.
+- Request approval calls the attendance service's transaction-aware correction method inside the same transaction. Request decision, correction, and audit must commit or roll back together. Do not nest separate `DatabaseService.transaction()` calls.
+- Attendance reports read an approved-request projection from the shared database, avoiding a runtime circular dependency between attendance and requests. Cross-feature writes go through the responsible service.
+- Keep feature-specific DTOs and types local. Add to `common/` only when multiple features genuinely share the contract or behavior. Preserve `.js` import extensions for the project's Node ESM configuration.
+- The dashboard and Flutter app consume the REST API only; neither may import backend services or access database files.
 
-# production mode
-$ npm run start:prod
+The `/` starter response is retained for compatibility; application health is `GET /api/health`.
+
+## Run Locally
+
+Use Node.js 24 or newer, from this directory:
+
+```powershell
+npm install
+Copy-Item .env.example .env
+npm run start:dev
 ```
 
-## Run tests
+Set `HR_ADMIN_EMAIL` and a unique `HR_ADMIN_PASSWORD` in `.env` before the first start. Do not overwrite an existing `.env`. Default API address: `http://127.0.0.1:3002/api`; default database: `data/hr.sqlite`. Existing administrators are not overwritten by bootstrap environment values.
 
-```bash
-# unit tests
-$ npm run test
+If port 3002 is already serving this backend, use that running instance instead of starting a second copy. Environment variables and deployment requirements are described in [the workspace README](../README.md).
 
-# e2e tests
-$ npm run test:e2e
+## Verify
 
-# test coverage
-$ npm run test:cov
+```powershell
+npm test
+npm run test:e2e
+npm run lint
+npm run build
 ```
 
-## Deployment
+Production startup after building: `npm run start:prod`. The tests use in-memory or generated temporary databases, never the company's development database.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+## Attendance Load Test
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+```powershell
+npm run test:load
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Builds the backend and runs an isolated loopback HTTP server on an automatically assigned port. Provisions 100 test employees, then sends separate bursts of 100 concurrent check-ins and 100 concurrent check-outs with generated 1600x1200 JPEG photos and valid office coordinates. Provisioning is not included in attendance timings. Output includes success/failure counts, requests per second, median, p95, and maximum response times. Any HTTP failure or incorrect stored record/photo count makes the command fail.
 
-## Observability
+All test records, credentials, sessions, audit entries, and photos live in a newly created OS temporary directory, not the company database or Docker volume. The server closes and that entire directory (including SQLite WAL files) is removed and its absence verified on success or failure. SIGINT/SIGTERM trigger cleanup where the host delivers those signals. Forced process termination, power loss, or an OS crash cannot guarantee cleanup; any leftover directory is prefixed `hr-attendance-load-` under the OS temporary folder.
 
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
+This is a local backend burst benchmark, not a production capacity guarantee or a test of mobile network speeds. Run it on the intended server before choosing a response-time target. It generates synthetic photos, not real location proof, and prints results without saving a report file.
 
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
-
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
-
-This project is already instrumented. Create a free account at [observe.nestjs.com](https://observe.nestjs.com), add an application, and paste the generated app key and secret into the `ObserveModule.forRoot()` call in `src/app.module.ts`.
-
-The free plan needs no payment details and covers 300,000 events a month. You can also browse the [live demo](https://www.observe-demo.nestjs.com/dashboard) first - the whole dashboard over a busy service's data, with nothing to install.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observe](https://observe.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+This structure follows [Nest's feature-module conventions](https://docs.nestjs.com/modules). HTTPS hosting, backups, retention policy, and pilot acceptance remain deployment work, not part of this structural refactor.

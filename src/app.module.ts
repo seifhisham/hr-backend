@@ -1,21 +1,31 @@
 import { Module } from '@nestjs/common';
-import { createObserveModule } from '@nestjs/observe';
+import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
-
-export const { ObserveModule, ObserveInstrument } = createObserveModule();
+import { AttendanceModule } from './attendance/attendance.module.js';
+import { AuditModule } from './audit/audit.module.js';
+import { AuthGuard } from './auth/auth.guard.js';
+import { AuthModule } from './auth/auth.module.js';
+import { CompanyModule } from './company/company.module.js';
+import { DatabaseModule } from './database/database.module.js';
+import { EmployeesModule } from './employees/employees.module.js';
+import { HealthModule } from './health/health.module.js';
+import { RequestsModule } from './requests/requests.module.js';
+import { SchedulesModule } from './schedules/schedules.module.js';
 
 @Module({
   imports: [
-    // Distributed tracing, auto-correlated logs, request/job metrics, error
-    // telemetry, alarms, and more — out of the box. Sign up at https://observe.nestjs.com
-    ObserveModule.forRoot({
-      appKey: 'YOUR_APP_KEY',
-      appSecret: 'YOUR_APP_SECRET',
-      serviceId: 'hr-backend',
-    }),
+    DatabaseModule,
+    AuditModule,
+    SchedulesModule,
+    CompanyModule,
+    EmployeesModule,
+    AuthModule,
+    AttendanceModule,
+    RequestsModule,
+    HealthModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [AppService, { provide: APP_GUARD, useClass: AuthGuard }],
 })
 export class AppModule {}

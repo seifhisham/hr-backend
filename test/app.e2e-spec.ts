@@ -8,6 +8,9 @@ describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
 
   beforeEach(async () => {
+    vi.stubEnv('HR_DATABASE_PATH', ':memory:');
+    vi.stubEnv('HR_ADMIN_EMAIL', 'admin@test.local');
+    vi.stubEnv('HR_ADMIN_PASSWORD', 'Test-admin-password-2026');
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
@@ -25,5 +28,6 @@ describe('AppController (e2e)', () => {
 
   afterEach(async () => {
     await app.close();
+    vi.unstubAllEnvs();
   });
 });
