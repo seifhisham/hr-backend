@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
 } from '@nestjs/common';
 import { z } from 'zod';
@@ -14,7 +15,10 @@ import { parse } from '../common/validation/parse.js';
 import { ZodValidationPipe } from '../common/validation/zod-validation.pipe.js';
 import {
   decisionSchema,
+  requestChangeSchema,
   requestSchema,
+  requestPageSchema,
+  type RequestPageDto,
   type RequestDecisionDto,
   type SubmitRequestDto,
 } from './dto/request.dto.js';
@@ -25,12 +29,37 @@ export class RequestsController {
   constructor(
     @Inject(RequestsService) private readonly requestsService: RequestsService,
   ) {}
-  @Get('me') myRequests(@Req() req: AuthRequest) {
-    return this.requestsService.requests(req.actor, true);
+  @Get('me') myRequests(
+    @Req() req: AuthRequest,
+    @Query(new ZodValidationPipe(requestPageSchema)) page: RequestPageDto,
+  ) {
+    return this.requestsService.requests(req.actor, true, page);
   }
 
-  @Get() requests(@Req() req: AuthRequest) {
-    return this.requestsService.requests(req.actor);
+  @Get('managed') managedRequests(
+    @Req() req: AuthRequest,
+    @Query(new ZodValidationPipe(requestPageSchema)) page: RequestPageDto,
+  ) {
+    return this.requestsService.managedRequests(req.actor, page);
+  }
+
+  @Patch(':id/manager-review') reviewRequest(
+    @Req() req: AuthRequest,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(decisionSchema)) body: RequestDecisionDto,
+  ) {
+    return this.requestsService.reviewRequest(
+      req.actor,
+      parse(z.uuid(), id),
+      body,
+    );
+  }
+
+  @Get() requests(
+    @Req() req: AuthRequest,
+    @Query(new ZodValidationPipe(requestPageSchema)) page: RequestPageDto,
+  ) {
+    return this.requestsService.requests(req.actor, false, page);
   }
 
   @Post() submitRequest(
@@ -38,6 +67,32 @@ export class RequestsController {
     @Body(new ZodValidationPipe(requestSchema)) body: SubmitRequestDto,
   ) {
     return this.requestsService.submitRequest(req.actor, body);
+  }
+
+  @Patch(':id/withdraw') withdrawRequest(
+    @Req() req: AuthRequest,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(requestChangeSchema)) body: { reason: string },
+  ) {
+    return this.requestsService.changeRequest(
+      req.actor,
+      parse(z.uuid(), id),
+      'withdraw',
+      body.reason,
+    );
+  }
+
+  @Patch(':id/reopen') reopenRequest(
+    @Req() req: AuthRequest,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(requestChangeSchema)) body: { reason: string },
+  ) {
+    return this.requestsService.changeRequest(
+      req.actor,
+      parse(z.uuid(), id),
+      'reopen',
+      body.reason,
+    );
   }
 
   @Patch(':id/decision') decideRequest(

@@ -1,0 +1,173 @@
+import { RequestsService } from '../requests/requests.service.js';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  attendance,
+  type AttendanceRow,
+} from '../attendance/attendance.mapper.js';
+import { attendanceStatus } from '../attendance/attendance-time.js';
+import type { Actor } from '../common/types/actor.type.js';
+import { DatabaseService } from '../database/database.service.js';
+import type { Employee } from '../employees/types/employee.type.js';
+import type { EmployeeRequest } from '../requests/types/employee-request.type.js';
+
+export type Notification = {
+  id: string;
+  type:
+    | 'manager-review-required'
+    | 'manager-reviewed'
+    | 'request-decided'
+    | 'request-reopened'
+    | 'pending-request'
+    | 'missing-check-out';
+  title: string;
+  message: string;
+  createdAt: string;
+  readAt: string | null;
+  requestId?: string;
+  attendanceId?: string;
+};
+
+@Injectable()
+export class NotificationsService {
+  constructor(
+    @Inject(DatabaseService) private readonly store: DatabaseService,
+    @Inject(RequestsService) private readonly requests: RequestsService,
+  ) {}
+
+  list(actor: Actor): { items: Notification[]; unreadCount: number } {
+    const db = this.store.db;
+    const items: Notification[] = [];
+    // Decisions already have a durable, transactional audit event. Use its ID
+    // so repeated reads never create duplicate notifications.
+    if (actor.employeeId) {
+      for (const row of db
+        .prepare(
+          `
+        SELECT id, at, action, actor_name, reason, after_data FROM audit
+        WHERE action IN ('request.approved', 'request.rejected', 'request.reopened', 'request.manager_reviewed')
+          AND json_extract(after_data, '$.employeeId') = ?
+        ORDER BY rowid DESC LIMIT 100
+      `,
+        )
+        .all(actor.employeeId)) {
+        const request = JSON.parse(row.after_data as string) as EmployeeRequest;
+        const reopened = row.action === 'request.reopened';
+        const managerReviewed = row.action === 'request.manager_reviewed';
+        items.push({
+          id: row.id as string,
+          type: managerReviewed
+            ? 'manager-reviewed'
+            : reopened
+              ? 'request-reopened'
+              : 'request-decided',
+          title: managerReviewed
+            ? `Manager recommended ${request.managerReview?.status}; awaiting HR`
+            : reopened
+              ? 'Request reopened for correction'
+              : `Request ${request.status}`,
+          message: `${request.type.replaceAll('-', ' ')}: ${row.reason as string} (${row.actor_name as string})`,
+          createdAt: row.at as string,
+          readAt: null,
+          requestId: request.id,
+        });
+      }
+    }
+    {
+      const privileged = actor.role === 'hr' || actor.role === 'admin';
+      const profiles = new Map<string, Employee>();
+      for (const row of db
+        .prepare(
+          `SELECT r.data, (SELECT id FROM audit WHERE record_id = r.id
+          AND action IN ('request.submitted', 'request.reopened', 'request.manager_reviewed', 'request.manager_review_reset') ORDER BY rowid DESC LIMIT 1) AS event_id
+          FROM employee_requests r WHERE r.status = 'pending'
+          ${privileged ? '' : "AND r.employee_id IN (SELECT id FROM employees WHERE json_extract(data, '$.managerId') = ?)"}`,
+        )
+        .all(...(privileged ? [] : [actor.employeeId]))) {
+        const request = this.requests.workflow(
+          JSON.parse(row.data as string) as EmployeeRequest,
+          profiles,
+        );
+        if (request.employeeId === actor.employeeId) continue;
+        const managerPending = request.managerStage === 'pending';
+        if (
+          managerPending
+            ? request.managerEmployeeId !== actor.employeeId
+            : actor.role !== 'hr' && actor.role !== 'admin'
+        )
+          continue;
+        if (
+          !managerPending &&
+          request.managerStage !== 'not-required' &&
+          request.managerReview?.employeeId === actor.employeeId
+        )
+          continue;
+        const createdAt =
+          (!managerPending && request.managerReview?.reviewedAt) ||
+          (request.lastChange?.action === 'reopen'
+            ? request.lastChange.at
+            : request.submittedAt);
+        items.push({
+          id: `${managerPending ? 'manager-pending' : 'pending'}:${(row.event_id as string | null) ?? request.id}`,
+          type: managerPending ? 'manager-review-required' : 'pending-request',
+          title: managerPending
+            ? 'Direct report request awaiting your review'
+            : 'Request awaiting HR decision',
+          message: `${request.employeeName}: ${request.type.replaceAll('-', ' ')}`,
+          createdAt,
+          readAt: null,
+          requestId: request.id,
+        });
+      }
+    }
+    if (actor.role === 'hr' || actor.role === 'admin') {
+      for (const row of db
+        .prepare(
+          `
+        SELECT a.*, e.data AS employee_data FROM attendance a
+        JOIN employees e ON e.id = a.employee_id WHERE a.check_out IS NULL
+      `,
+        )
+        .all()) {
+        const record = attendance(row as AttendanceRow);
+        if (attendanceStatus(record, new Date()) !== 'Missing check-out')
+          continue;
+        const employee = JSON.parse(row.employee_data as string) as Employee;
+        items.push({
+          id: `missing:${record.id}`,
+          type: 'missing-check-out',
+          title: 'Missing check-out',
+          message: `${employee.name}: ${record.workDate} (${record.timezone})`,
+          createdAt: record.checkIn,
+          readAt: null,
+          attendanceId: record.id,
+        });
+      }
+    }
+    const reads = new Map(
+      db
+        .prepare(
+          'SELECT notification_id, read_at FROM notification_reads WHERE user_id = ?',
+        )
+        .all(actor.id)
+        .map((row) => [row.notification_id as string, row.read_at as string]),
+    );
+    for (const item of items) item.readAt = reads.get(item.id) ?? null;
+    items.sort(
+      (a, b) =>
+        b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id),
+    );
+    return { items, unreadCount: items.filter((item) => !item.readAt).length };
+  }
+
+  markRead(actor: Actor, id: string) {
+    const item = this.list(actor).items.find((item) => item.id === id);
+    if (!item) throw new NotFoundException('Notification not found');
+    const readAt = item.readAt ?? new Date().toISOString();
+    this.store.db
+      .prepare(
+        'INSERT OR IGNORE INTO notification_reads (user_id, notification_id, read_at) VALUES (?, ?, ?)',
+      )
+      .run(actor.id, id, readAt);
+    return { ...item, readAt };
+  }
+}

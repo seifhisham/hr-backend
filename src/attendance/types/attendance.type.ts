@@ -1,4 +1,5 @@
 import type { Schedule } from '../../schedules/types/schedule.type.js';
+import type { AttendanceLocationService } from '../attendance-location.service.js';
 
 export type Attendance = {
   id: string;
@@ -11,9 +12,10 @@ export type Attendance = {
 };
 
 export type ReportRow = {
+  location: ReturnType<AttendanceLocationService['view']>;
   id: string | null;
   employeeId: string;
-  employeeCode: string;
+  nationalId: string;
   name: string;
   department: string;
   workDate: string;

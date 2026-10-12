@@ -15,7 +15,7 @@ import { DatabaseService } from '../database/database.service.js';
 export const officePolicy = Object.freeze({
   latitude: 30.023092,
   longitude: 31.528179,
-  radiusMeters: 100,
+  radiusMeters: 50,
   maxAccuracyMeters: 50,
   maxCaptureAgeSeconds: 120,
   maxPhotoBytes: 5 * 1024 * 1024,
@@ -51,7 +51,7 @@ export function validateLocation(body: unknown) {
   const distanceMeters = getDistance(input, officePolicy, 0.01);
   if (distanceMeters > officePolicy.radiusMeters)
     throw new ForbiddenException(
-      'You must be within 100 metres of the office to check in or out.',
+      'You must be within 50 metres of the office to check in or out.',
     );
   return { ...input, distanceMeters };
 }
@@ -83,12 +83,12 @@ export class AttendanceEvidence {
       const photo = await image
         .rotate()
         .resize({
-          width: 1600,
-          height: 1600,
+          width: 1280,
+          height: 1280,
           fit: 'inside',
           withoutEnlargement: true,
         })
-        .jpeg({ quality: 85 })
+        .jpeg({ quality: 85, optimiseCoding: false })
         .toBuffer();
       return { ...location, photo };
     } catch {
@@ -161,7 +161,16 @@ export class AttendanceEvidence {
       .get(id);
     if (
       !row ||
-      (actor.role === 'employee' && actor.employeeId !== row.employee_id)
+      ((actor.role === 'employee' || actor.role === 'manager') &&
+        actor.employeeId !== row.employee_id &&
+        !(
+          actor.role === 'manager' &&
+          this.store.db
+            .prepare(
+              "SELECT 1 FROM employees WHERE id = ? AND json_extract(data, '$.managerId') = ?",
+            )
+            .get(row.employee_id, actor.employeeId)
+        ))
     )
       throw new NotFoundException('Attendance record not found');
   }

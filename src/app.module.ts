@@ -1,3 +1,5 @@
+import { NotificationsModule } from './notifications/notifications.module.js';
+import { DepartmentsModule } from './departments/departments.module.js';
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller.js';
@@ -11,11 +13,15 @@ import { DatabaseModule } from './database/database.module.js';
 import { EmployeesModule } from './employees/employees.module.js';
 import { HealthModule } from './health/health.module.js';
 import { RequestsModule } from './requests/requests.module.js';
+import { PayrollModule } from './payroll/payroll.module.js';
 import { SchedulesModule } from './schedules/schedules.module.js';
+import { SalesModule } from './sales/sales.module.js';
 
 @Module({
   imports: [
     DatabaseModule,
+    NotificationsModule,
+    DepartmentsModule,
     AuditModule,
     SchedulesModule,
     CompanyModule,
@@ -23,6 +29,8 @@ import { SchedulesModule } from './schedules/schedules.module.js';
     AuthModule,
     AttendanceModule,
     RequestsModule,
+    PayrollModule,
+    SalesModule,
     HealthModule,
   ],
   controllers: [AppController],

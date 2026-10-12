@@ -29,6 +29,10 @@ export const filtersSchema = z
         'Not scheduled',
         'Approved leave',
         'Approved holiday',
+        'Approved sick',
+        'Approved unpaid',
+        'Approved urgent',
+        'Approved mission',
       ])
       .optional(),
   })

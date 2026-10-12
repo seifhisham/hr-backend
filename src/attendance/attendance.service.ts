@@ -17,6 +17,7 @@ import type { EmployeeRequest } from '../requests/types/employee-request.type.js
 import { SchedulesService } from '../schedules/schedules.service.js';
 import type { Evidence } from './attendance-evidence.service.js';
 import { AttendanceEvidence } from './attendance-evidence.service.js';
+import { AttendanceLocationService } from './attendance-location.service.js';
 import {
   arrivalStatus,
   attendanceStatus,
@@ -44,6 +45,8 @@ export class AttendanceService {
     private readonly schedulesService: SchedulesService,
     @Inject(CompanyService) private readonly companyService: CompanyService,
     @Inject(AuditService) private readonly auditService: AuditService,
+    @Inject(AttendanceLocationService)
+    private readonly location: AttendanceLocationService,
   ) {}
   private get db() {
     return this.store.db;
@@ -51,6 +54,8 @@ export class AttendanceService {
 
   myAttendance(actor: Actor) {
     const employee = this.employeesService.employeeActor(actor);
+    this.location.sweep();
+    const current = this.schedulesService.currentWorkday(employee.id);
     const records = this.db
       .prepare(
         'SELECT * FROM attendance WHERE employee_id = ? ORDER BY work_date DESC LIMIT 93',
@@ -58,15 +63,12 @@ export class AttendanceService {
       .all(employee.id) as AttendanceRow[];
     return {
       employee,
-      schedule: this.schedulesService.schedule(employee.scheduleId),
-      workDate: workDate(
-        new Date(),
-        this.schedulesService.schedule(employee.scheduleId),
-        this.companyService.settings().timezone,
-      ),
+      schedule: current.schedule,
+      workDate: current.date,
       records: records.map((r) => ({
         ...attendance(r),
         status: attendanceStatus(attendance(r), new Date()),
+        location: this.location.view(r.id),
       })),
     };
   }
@@ -75,10 +77,11 @@ export class AttendanceService {
     const employee = this.employeesService.employeeActor(actor);
     if (!employee.active) throw new ForbiddenException('Employee is inactive');
     return this.store.transaction(() => {
-      const schedule = this.schedulesService.schedule(employee.scheduleId);
+      const { schedule, date } = this.schedulesService.currentWorkday(
+        employee.id,
+      );
       const timezone = this.companyService.settings().timezone;
       const now = new Date();
-      const date = workDate(now, schedule, timezone);
       if (employee.startDate > date)
         throw new BadRequestException(
           'Attendance cannot start before employment begins',
@@ -119,6 +122,7 @@ export class AttendanceService {
           timezone,
         );
       this.evidence.save(record.id, 'check-in', evidence, record.checkIn);
+      this.location.start(record.id, actor);
       return record;
     });
   }
@@ -136,12 +140,14 @@ export class AttendanceService {
         .prepare('UPDATE attendance SET check_out = ? WHERE id = ?')
         .run(row.check_out, row.id);
       this.evidence.save(row.id, 'check-out', evidence, row.check_out);
+      this.location.reset(row.id);
       return attendance(row);
     });
   }
 
   report(actor: Actor, filters: AttendanceFiltersDto): ReportRow[] {
-    requireHr(actor);
+    if (actor.role !== 'manager') requireHr(actor);
+    this.location.sweep();
     const records = (
       this.db
         .prepare(
@@ -149,13 +155,15 @@ export class AttendanceService {
         )
         .all(filters.from, filters.to) as AttendanceRow[]
     ).map(attendance);
-    const employees = this.employeesService
-      .employees(actor)
-      .filter(
-        (e) =>
-          (!filters.employeeId || e.id === filters.employeeId) &&
-          (!filters.department || e.department === filters.department),
-      );
+    const employees = (
+      actor.role === 'manager'
+        ? this.employeesService.managedEmployees(actor)
+        : this.employeesService.employees(actor)
+    ).filter(
+      (e) =>
+        (!filters.employeeId || e.id === filters.employeeId) &&
+        (!filters.department || e.department === filters.department),
+    );
     const byKey = new Map(
       records.map((r) => [`${r.employeeId}:${r.workDate}`, r]),
     );
@@ -166,7 +174,10 @@ export class AttendanceService {
       .all()
       .map((r) => JSON.parse(r.data as string) as EmployeeRequest)
       .filter(
-        (r) => r.status === 'approved' && r.type !== 'forgotten-check-out',
+        (r) =>
+          r.status === 'approved' &&
+          r.type !== 'forgotten-check-out' &&
+          r.type !== 'excuse',
       );
     for (
       let date = filters.from;
@@ -180,7 +191,7 @@ export class AttendanceService {
           (!employee.active ||
             employee.startDate > date ||
             !this.schedulesService
-              .schedule(employee.scheduleId)
+              .assignedSchedule(employee.id, date)
               .days.includes(weekday(date)))
         )
           continue;
@@ -196,13 +207,15 @@ export class AttendanceService {
           : approved
             ? approved.type === 'leave'
               ? 'Approved leave'
-              : 'Approved holiday'
+              : approved.type === 'holiday'
+                ? 'Approved holiday'
+                : `Approved ${approved.type}`
             : 'No record';
         if (filters.status && filters.status !== status) continue;
         rows.push({
           id: record?.id ?? null,
           employeeId: employee.id,
-          employeeCode: employee.employeeCode,
+          nationalId: actor.role === 'manager' ? '' : employee.nationalId,
           name: employee.name,
           department: employee.department,
           workDate: date,
@@ -218,6 +231,7 @@ export class AttendanceService {
               ) / 100
             : null,
           timezone: record?.timezone ?? this.companyService.settings().timezone,
+          location: record ? this.location.view(record.id) : null,
         });
       }
     }
@@ -257,6 +271,7 @@ export class AttendanceService {
     this.db
       .prepare('UPDATE attendance SET check_in = ?, check_out = ? WHERE id = ?')
       .run(checkIn, checkOut, id);
+    this.location.reset(id);
     this.auditService.record(
       actor,
       'attendance.corrected',
@@ -282,7 +297,10 @@ export class AttendanceService {
         workDate: input.workDate,
         checkIn: input.checkIn,
         checkOut: input.checkOut,
-        schedule: this.schedulesService.schedule(employee.scheduleId),
+        schedule: this.schedulesService.assignedSchedule(
+          employee.id,
+          input.workDate,
+        ),
         timezone: this.companyService.settings().timezone,
       };
       Object.assign(record, this.validateTimes(record, input));

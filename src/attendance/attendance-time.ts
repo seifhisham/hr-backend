@@ -1,16 +1,23 @@
 import type { Schedule } from '../schedules/types/schedule.type.js';
 import type { Attendance } from './types/attendance.type.js';
 
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
 export function localTime(now: Date, timezone: string) {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(now);
+  let formatter = formatters.get(timezone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    });
+    formatters.set(timezone, formatter);
+  }
+  const parts = formatter.formatToParts(now);
   const part = (type: string) => parts.find((p) => p.type === type)!.value;
   return {
     date: `${part('year')}-${part('month')}-${part('day')}`,

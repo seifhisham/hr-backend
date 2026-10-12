@@ -1,11 +1,13 @@
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { existsSync } from 'node:fs';
 import { AppModule } from './app.module.js';
 
 if (existsSync('.env')) process.loadEnvFile('.env');
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  app.useBodyParser('json', { limit: '3mb' });
   app.use(
     (
       _req: unknown,

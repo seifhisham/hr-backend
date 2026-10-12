@@ -2,7 +2,7 @@ import { ForbiddenException } from '@nestjs/common';
 import type { Actor } from '../types/actor.type.js';
 
 export function requireHr(actor: Actor) {
-  if (actor.role === 'employee')
+  if (actor.role !== 'hr' && actor.role !== 'admin')
     throw new ForbiddenException('HR access required');
 }
 

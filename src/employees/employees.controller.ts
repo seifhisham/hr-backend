@@ -25,6 +25,20 @@ export class EmployeesController {
     return this.employeesService.employees(req.actor);
   }
 
+  @Get('reports') reports(@Req() req: AuthRequest) {
+    return this.employeesService.reports(req.actor);
+  }
+
+  @Get(':id/schedules') scheduleHistory(
+    @Req() req: AuthRequest,
+    @Param('id') id: string,
+  ) {
+    return this.employeesService.scheduleHistory(
+      req.actor,
+      parse(z.uuid(), id),
+    );
+  }
+
   @Post() createEmployee(
     @Req() req: AuthRequest,
     @Body(new ZodValidationPipe(employeeSchema)) body: SaveEmployeeDto,

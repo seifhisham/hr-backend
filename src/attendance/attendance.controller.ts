@@ -28,6 +28,10 @@ import {
 import { localTime } from './attendance-time.js';
 import { AttendanceService } from './attendance.service.js';
 import {
+  AttendanceLocationService,
+  trackingPolicy,
+} from './attendance-location.service.js';
+import {
   correctionSchema,
   filtersSchema,
   manualAttendanceSchema,
@@ -54,13 +58,24 @@ export class AttendanceController {
     @Inject(AttendanceService)
     private readonly attendanceService: AttendanceService,
     @Inject(AttendanceEvidence) private readonly evidence: AttendanceEvidence,
+    @Inject(AttendanceLocationService)
+    private readonly location: AttendanceLocationService,
   ) {}
   @Get('me') mine(@Req() req: AuthRequest) {
     return this.attendanceService.myAttendance(req.actor);
   }
 
   @Get('policy') policy() {
-    return officePolicy;
+    return { ...officePolicy, tracking: trackingPolicy };
+  }
+
+  @Post(':id/location')
+  locationUpdate(
+    @Req() req: AuthRequest,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    return this.location.update(req.actor, parse(z.uuid(), id), body);
   }
 
   @Post('check-in')
@@ -152,7 +167,7 @@ export class AttendanceController {
     };
     const csv = [
       [
-        'Employee code',
+        'National ID',
         'Name',
         'Department',
         'Workday',
@@ -161,9 +176,11 @@ export class AttendanceController {
         'Timezone',
         'Status',
         'Hours',
+        'Location status',
+        'Return deadline (UTC)',
       ],
       ...rows.map((r) => [
-        r.employeeCode,
+        r.nationalId,
         r.name,
         r.department,
         r.workDate,
@@ -172,6 +189,8 @@ export class AttendanceController {
         r.timezone,
         r.status,
         r.hours,
+        r.location?.status ?? null,
+        r.location?.returnBy ?? null,
       ]),
     ]
       .map((row) => row.map(cell).join(','))

@@ -1,3 +1,4 @@
+import { payrollMonthSchema } from '../payroll/dto/deduction.dto.js';
 import { Controller, Get, Inject, Query, Req } from '@nestjs/common';
 import { z } from 'zod';
 import type { AuthRequest } from '../auth/types/auth-request.type.js';
@@ -12,7 +13,7 @@ export class AuditController {
   @Get() audit(@Req() req: AuthRequest, @Query('recordId') id?: string) {
     return this.auditService.auditHistory(
       req.actor,
-      id ? parse(z.uuid(), id) : undefined,
+      id ? parse(z.union([z.uuid(), payrollMonthSchema]), id) : undefined,
     );
   }
 }

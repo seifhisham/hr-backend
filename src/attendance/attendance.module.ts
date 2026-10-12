@@ -8,6 +8,7 @@ import { SchedulesModule } from '../schedules/schedules.module.js';
 import { AttendanceEvidence } from './attendance-evidence.service.js';
 import { AttendanceController } from './attendance.controller.js';
 import { AttendanceService } from './attendance.service.js';
+import { AttendanceLocationService } from './attendance-location.service.js';
 
 @Module({
   imports: [
@@ -19,7 +20,7 @@ import { AttendanceService } from './attendance.service.js';
     AuthModule,
   ],
   controllers: [AttendanceController],
-  providers: [AttendanceService, AttendanceEvidence],
+  providers: [AttendanceService, AttendanceEvidence, AttendanceLocationService],
   exports: [AttendanceService],
 })
 export class AttendanceModule {}

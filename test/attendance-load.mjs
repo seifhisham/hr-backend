@@ -58,7 +58,7 @@ try {
     const employee = await call('/employees', {
       token: admin.token,
       body: {
-        employeeCode: `LOAD-${index}`, name: `Load Employee ${index}`,
+        nationalId: `LOAD-${index}`, name: `Load Employee ${index}`,
         email: `load-${index}@test.local`, department: 'Load test',
         jobTitle: 'Test employee', startDate: '2026-01-01',
         scheduleId: schedules[0].id, role: 'employee', active: true, password,

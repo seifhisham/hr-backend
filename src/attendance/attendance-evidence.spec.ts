@@ -14,16 +14,16 @@ describe('Office boundary', () => {
       };
       expect(
         validateLocation({
-          ...computeDestinationPoint(officePolicy, 99.9, bearing, 6378137),
+          ...computeDestinationPoint(officePolicy, 49.9, bearing, 6378137),
           ...input,
         }).distanceMeters,
-      ).toBeLessThanOrEqual(100);
+      ).toBeLessThanOrEqual(50);
       expect(() =>
         validateLocation({
-          ...computeDestinationPoint(officePolicy, 100.1, bearing, 6378137),
+          ...computeDestinationPoint(officePolicy, 50.1, bearing, 6378137),
           ...input,
         }),
-      ).toThrow('within 100 metres');
+      ).toThrow('within 50 metres');
     }
   });
 });

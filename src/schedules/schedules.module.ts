@@ -1,11 +1,12 @@
 import { Module } from '@nestjs/common';
 import { AuditModule } from '../audit/audit.module.js';
 import { DatabaseModule } from '../database/database.module.js';
+import { CompanyModule } from '../company/company.module.js';
 import { SchedulesController } from './schedules.controller.js';
 import { SchedulesService } from './schedules.service.js';
 
 @Module({
-  imports: [DatabaseModule, AuditModule],
+  imports: [DatabaseModule, AuditModule, CompanyModule],
   controllers: [SchedulesController],
   providers: [SchedulesService],
   exports: [SchedulesService],
