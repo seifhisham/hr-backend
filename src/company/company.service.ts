@@ -16,13 +16,17 @@ export class CompanyService {
   }
 
   settings() {
-    return JSON.parse(
-      (
-        this.db
-          .prepare("SELECT value FROM settings WHERE key = 'company'")
-          .get() as { value: string }
-      ).value,
-    ) as { name: string; timezone: string };
+    return this.store.cachedRead(
+      'company',
+      () =>
+        JSON.parse(
+          (
+            this.db
+              .prepare("SELECT value FROM settings WHERE key = 'company'")
+              .get() as { value: string }
+          ).value,
+        ) as { name: string; timezone: string },
+    );
   }
 
   updateSettings(actor: Actor, value: UpdateCompanyDto) {

@@ -16,14 +16,13 @@ import { localTime } from '../attendance/attendance-time.js';
 import { CompanyService } from '../company/company.service.js';
 import type { Actor } from '../common/types/actor.type.js';
 import { EmployeesService } from '../employees/employees.service.js';
-import { RequestsService } from '../requests/requests.service.js';
+import type { EmployeeRequest } from '../requests/types/employee-request.type.js';
 
 @Injectable()
 export class PayrollService {
   constructor(
     @Inject(EmployeesService)
     private readonly employeesService: EmployeesService,
-    @Inject(RequestsService) private readonly requestsService: RequestsService,
     @Inject(CompanyService) private readonly companyService: CompanyService,
     @Inject(DatabaseService) private readonly store: DatabaseService,
     @Inject(AuditService) private readonly auditService: AuditService,
@@ -163,7 +162,12 @@ export class PayrollService {
 
   private calculate(actor: Actor, month: string): PayrollRow[] {
     const employees = this.employeesService.employees(actor);
-    const requests = this.requestsService.requests(actor);
+    const requests = this.store.db
+      .prepare(
+        "SELECT data FROM employee_requests WHERE status != 'pending' AND json_extract(data, '$.salaryDeductionDays') IS NOT NULL ORDER BY rowid DESC",
+      )
+      .all()
+      .map((row) => JSON.parse(row.data as string) as EmployeeRequest);
     const { timezone } = this.companyService.settings();
     const manual = this.store.db
       .prepare(
@@ -171,30 +175,36 @@ export class PayrollService {
       )
       .all(month)
       .map((row) => JSON.parse(row.data as string) as PayrollDeduction);
+    const requestsByEmployee = new Map<string, EmployeeRequest[]>();
+    for (const request of requests) {
+      if (
+        !request.decidedAt ||
+        localTime(new Date(request.decidedAt), timezone).date.slice(0, 7) !==
+          month
+      )
+        continue;
+      const deductions = requestsByEmployee.get(request.employeeId) ?? [];
+      deductions.push(request);
+      requestsByEmployee.set(request.employeeId, deductions);
+    }
+    const manualByEmployee = new Map<string, PayrollDeduction[]>();
+    for (const deduction of manual) {
+      const deductions = manualByEmployee.get(deduction.employeeId) ?? [];
+      deductions.push(deduction);
+      manualByEmployee.set(deduction.employeeId, deductions);
+    }
     return employees
       .filter((employee) => employee.startDate.slice(0, 7) <= month)
       .map((employee) => {
-        const deductions = requests
-          .filter(
-            (request) =>
-              request.employeeId === employee.id &&
-              request.status !== 'pending' &&
-              request.salaryDeductionDays != null &&
-              request.decidedAt &&
-              localTime(new Date(request.decidedAt), timezone).date.slice(
-                0,
-                7,
-              ) === month,
-          )
-          .map((request) => ({
+        const deductions = (requestsByEmployee.get(employee.id) ?? []).map(
+          (request) => ({
             requestId: request.id,
             status: request.status,
             decidedAt: request.decidedAt,
             days: request.salaryDeductionDays!,
-          }));
-        const manualDeductions = manual.filter(
-          (deduction) => deduction.employeeId === employee.id,
+          }),
         );
+        const manualDeductions = manualByEmployee.get(employee.id) ?? [];
         const deductionDays =
           manualDeductions.reduce(
             (total, deduction) => total + deduction.days,

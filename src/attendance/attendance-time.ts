@@ -70,11 +70,13 @@ export function arrivalStatus(record: Attendance) {
   if (!record.schedule.days.includes(weekday(record.workDate)))
     return 'Not scheduled';
   const elapsed =
-    ((Date.parse(`${local.date}T00:00:00Z`) -
-      Date.parse(`${record.workDate}T00:00:00Z`)) /
-      86400000) *
-      1440 +
-    local.minutes;
+    local.date === record.workDate
+      ? local.minutes
+      : ((Date.parse(`${local.date}T00:00:00Z`) -
+          Date.parse(`${record.workDate}T00:00:00Z`)) /
+          86400000) *
+          1440 +
+        local.minutes;
   return elapsed > minutes(record.schedule.start) + record.schedule.graceMinutes
     ? 'Late'
     : 'On time';

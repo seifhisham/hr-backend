@@ -12,10 +12,12 @@ export class DepartmentsService {
   ) {}
   list(actor: Actor) {
     requireHr(actor);
-    return this.store.db
-      .prepare('SELECT name FROM departments ORDER BY name COLLATE NOCASE')
-      .all()
-      .map((row) => ({ name: row.name as string }));
+    return this.store.cachedRead('departments', () =>
+      this.store.db
+        .prepare('SELECT name FROM departments ORDER BY name COLLATE NOCASE')
+        .all()
+        .map((row) => ({ name: row.name as string })),
+    );
   }
 
   create(actor: Actor, input: CreateDepartmentDto) {

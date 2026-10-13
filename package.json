@@ -18,6 +18,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:load": "npm run build && node test/attendance-load.mjs",
+    "test:performance": "npm run build && node test/api-performance.mjs",
+    "test:mixed": "npm run build && node test/api-mixed-load.mjs",
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts"

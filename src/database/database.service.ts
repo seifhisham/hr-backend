@@ -1,17 +1,27 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { DATABASE_SCHEMA } from './database.schema.js';
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
   readonly db: DatabaseSync;
+  private readonly cacheState: StatementSync;
+  private readonly readCache = new Map<
+    string,
+    { value: string; expires: number }
+  >();
+  private cacheRevision = '';
+  private readonly cacheEnabled = process.env.HR_READ_CACHE !== 'false';
 
   constructor() {
     const path = process.env.HR_DATABASE_PATH ?? resolve('data/hr.sqlite');
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path, { timeout: 5000 });
+    this.cacheState = this.db.prepare(
+      'SELECT total_changes() AS changes, data_version FROM pragma_data_version',
+    );
     this.db.exec(DATABASE_SCHEMA);
     if (
       this.db
@@ -123,6 +133,28 @@ export class DatabaseService implements OnModuleDestroy {
     });
   }
 
+  cachedRead<T>(key: string, load: () => T): T {
+    // Cache only JSON reference data; parsing gives every caller an independent value.
+    // Transaction reads must see their own writes and never publish uncommitted data.
+    if (!this.cacheEnabled || this.db.isTransaction) return load();
+    const state = this.cacheState.get()!;
+    const revision = `${String(state.changes)}:${String(state.data_version)}`;
+    if (revision !== this.cacheRevision) {
+      this.readCache.clear();
+      this.cacheRevision = revision;
+    }
+    const now = performance.now();
+    const cached = this.readCache.get(key);
+    if (cached && cached.expires > now) return JSON.parse(cached.value) as T;
+    this.readCache.delete(key);
+    const value = load();
+    const copy = JSON.stringify(value);
+    if (this.readCache.size >= 256)
+      this.readCache.delete(this.readCache.keys().next().value!);
+    this.readCache.set(key, { value: copy, expires: now + 60_000 });
+    return value;
+  }
+
   // Call inside the employee write transaction so allocation and saving are atomic.
   nextEmployeeNumber(): string {
     const row = this.db
@@ -142,6 +174,7 @@ export class DatabaseService implements OnModuleDestroy {
     try {
       const result = operation();
       this.db.exec('COMMIT');
+      this.readCache.clear();
       return result;
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -150,6 +183,7 @@ export class DatabaseService implements OnModuleDestroy {
   }
 
   onModuleDestroy() {
+    this.readCache.clear();
     this.db.close();
   }
 }

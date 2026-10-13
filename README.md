@@ -2,6 +2,36 @@
 
 NestJS REST API for the HR dashboard and the later Flutter application. Uses SQLite, Zod request validation, and session authentication. See [API.md](API.md) for endpoint contracts and [the project BRD](../BRD.md) for business requirements.
 
+## Backend read cache
+
+Company settings, department lists, and schedule definitions (including date-specific versions) use a process-local JSON cache in `DatabaseService`. It holds at most 256 entries for up to 60 seconds and returns independent objects. Set `HR_READ_CACHE=false` and restart the backend to bypass it.
+
+Successful transactions clear the cache before returning. Before each cached read, SQLite's `total_changes()` and `data_version` are checked to detect direct writes on this connection and committed writes from other connections. Reads inside any SQLite transaction bypass the cache entirely, so uncommitted values are never cached. Failed loads are not cached. Invalidation is intentionally broad: unrelated database writes can also clear reference data.
+
+Authentication, authorization, employee relationships, schedule assignments, attendance status, notifications, payroll, requests, and sales results remain fresh database reads or calculations. Current dates and workdays are recalculated using the current clock and company timezone. HTTP responses retain their existing `no-store` policy, and clients continue using REST exclusively.
+
+Tests use isolated databases. Run `npm test -- src/database/read-cache.spec.ts` for cache regression checks, including external connection updates, rollback, permissions, expiration, eviction, and mutable results. Do not replace or restore the live database file while the backend is running; restart the backend after an offline restore.
+
+## Report performance and consistency
+
+Employee lists resolve current assignments in bulk. Attendance reports load scoped attendance, location states, effective schedule history, and overlapping approved leave in batches. Sales summaries group raw activities and targets once; payroll groups eligible deductions once without expanding unrelated request workflows. Existing ordering, currency rounding, approved payroll snapshots, and revision checks are retained.
+
+Attendance report construction runs one report at a time per backend process to bound memory. It yields between batches of 1,000 employee/day slots so socket handling and attendance writes can progress. Data is loaded when a report reaches the head of the queue and stays fixed within that report; requests admitted after an update read the new state. Failed reports release the queue. Sessions and role/profile identity are checked again before delivering JSON reports or CSV exports.
+
+Attendance JSON reports of at least 64 KiB use gzip level 1 when the client prefers gzip. Decoded JSON and full CSV exports retain their contracts. Responses remain `no-store`, vary by encoding/client, and fall back to identity if compression fails. A tested Node 24 fetch incompatibility requires identity for its `User-Agent: node` requests with `Connection: close`; persistent connections and the installed Next.js rewrite proxy were tested with gzip. Re-test that workaround after a Node runtime upgrade.
+
+## REST performance benchmark
+
+Run `npm run test:performance` from `hr-backend`. It builds the backend and measures authenticated employee, attendance (one and three months), payroll preview, sales performance, and schedule reads over HTTP with caching off and on. The client and backend run in separate processes. Each endpoint has 30 measured requests with one reader and another 30 with 10 concurrent readers; response download and JSON parsing are included. Fresh HTTP connections avoid keep-alive reuse affecting comparisons; failed requests are recorded without retries.
+
+The benchmark seeds synthetic workloads of 100 and 500 employees into temporary file-backed databases, using July–September 2026 history, four requests and one payroll deduction per employee, and 20 monthly activities per sales employee (25% of employees). Fixture generation is outside timing. Attendance fixtures are closed intervals without photo uploads; this benchmark measures read APIs, not check-in/photo processing or write contention. Localhost results exclude deployment networking, the frontend proxy, and production hardware.
+
+Results are saved as JSON and CSV in `../artifacts/api-performance.*`, with latency percentiles, throughput, decoded and wire response sizes, row counts, failures, backend CPU, event-loop delay, end-of-phase RSS, query plans, and separately profiled SQL counts. SQL profiling includes already-prepared cache change-counter statements and counts `get/all/run` executions; transaction `exec` calls are not included. Partial JSON results are saved as endpoints finish. Every request validates its response, and the run verifies fixture counts and selected business totals. Existing database files and credentials are never used; only the temporary directory created by this run is removed.
+
+For persistent-connection diagnostics, set `HR_PERF_KEEP_ALIVE=true` and run `node test/api-performance.mjs ../artifacts/api-performance-keepalive.json` after building. The default fresh-connection run uses identity for the Node compatibility case above; persistent runs exercise gzip and report its wire size.
+
+Run `npm run test:mixed` to exercise one quarterly-report reader alongside 10 attendance workers on a database with 500 historical employees and 30 new authenticated employees. It also verifies live manager/salary changes, request routing/decisions, and rejection of stale payroll approval. Results and backend resource measurements are saved to `../artifacts/api-mixed-performance.json`.
+
 ## Structure
 
 ```text
@@ -74,10 +104,14 @@ Production startup after building: `npm run start:prod`. The tests use in-memory
 npm run test:load
 ```
 
-Builds the backend and runs an isolated loopback HTTP server on an automatically assigned port. Provisions 100 test employees, then sends separate bursts of 100 concurrent check-ins and 100 concurrent check-outs with generated 1600x1200 JPEG photos and valid office coordinates. Provisioning is not included in attendance timings. Output includes success/failure counts, requests per second, median, p95, and maximum response times. Any HTTP failure or incorrect stored record/photo count makes the command fail.
+Builds the backend and runs an isolated loopback HTTP server on an automatically assigned port in a separate process from the client. Provisions 160 test employees through REST, then measures fresh check-ins and check-outs with one client (30 employees), 10 concurrent clients (30 employees), and a 100-client burst (100 employees). Each request uploads a generated 1600x1200 JPEG with valid office coordinates. Caching is enabled, HTTP connections are fresh, and requests are not retried. Provisioning and login are outside attendance timings. Results include success/failure counts, requests per second, median, p95, and maximum response times, saved to `../artifacts/attendance-performance.json`.
 
 All test records, credentials, sessions, audit entries, and photos live in a newly created OS temporary directory, not the company database or Docker volume. The server closes and that entire directory (including SQLite WAL files) is removed and its absence verified on success or failure. SIGINT/SIGTERM trigger cleanup where the host delivers those signals. Forced process termination, power loss, or an OS crash cannot guarantee cleanup; any leftover directory is prefixed `hr-attendance-load-` under the OS temporary folder.
 
-This is a local backend burst benchmark, not a production capacity guarantee or a test of mobile network speeds. Run it on the intended server before choosing a response-time target. It generates synthetic photos, not real location proof, and prints results without saving a report file.
+The test also checks missing photos, out-of-office GPS, unauthenticated requests, another employee attempting checkout, duplicate submissions, and immediate reads after writes. It verifies one closed attendance record and two non-empty photo-evidence records per employee, removal of location tracking after checkout, foreign keys, and normalization of one stored image. Any unexpected response or incorrect persistence makes the command fail. Partial results are saved with `complete: false` if the run stops early.
+
+After building, pass a JSON path to `node test/attendance-load.mjs` to preserve earlier results. Set `HR_ATTENDANCE_DIAGNOSTICS=true` for a separate instrumented run that records elapsed metadata decode, image normalization (including processing queue wait), and attendance write transaction time. `HR_PERF_SHARP_CONCURRENCY` changes Sharp concurrency only in this benchmark's child server, allowing hardware comparisons without changing production defaults. Diagnostic timings include instrumentation overhead and should not replace the uninstrumented baseline. Set `HR_PERF_PHOTO_WORKLOAD` to `standard-jpeg`, `large-jpeg`, or `png` to compare synthetic upload workloads.
+
+This is a local backend benchmark with fresh employees and no pre-existing attendance/photo history, not a production capacity guarantee or a test of mobile network speeds. It measures attendance writes separately from reports; mixed read/write contention is not tested. Run it on the intended server before choosing a response-time target. Photos are synthetic noise images, not real location proof, and their sizes/processing characteristics may differ from actual camera photos.
 
 This structure follows [Nest's feature-module conventions](https://docs.nestjs.com/modules). HTTPS hosting, backups, retention policy, and pilot acceptance remain deployment work, not part of this structural refactor.

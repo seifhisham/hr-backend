@@ -7,6 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import { setImmediate } from 'node:timers/promises';
 import { AuditService } from '../audit/audit.service.js';
 import { requireHr } from '../common/security/permissions.js';
 import type { Actor } from '../common/types/actor.type.js';
@@ -36,6 +37,7 @@ import type { Attendance, ReportRow } from './types/attendance.type.js';
 
 @Injectable()
 export class AttendanceService {
+  private reportQueue: Promise<void> = Promise.resolve();
   constructor(
     @Inject(DatabaseService) private readonly store: DatabaseService,
     @Inject(AttendanceEvidence) private readonly evidence: AttendanceEvidence,
@@ -145,16 +147,30 @@ export class AttendanceService {
     });
   }
 
-  report(actor: Actor, filters: AttendanceFiltersDto): ReportRow[] {
+  async report(
+    actor: Actor,
+    filters: AttendanceFiltersDto,
+  ): Promise<ReportRow[]> {
+    if (actor.role !== 'manager') requireHr(actor);
+    const previous = this.reportQueue;
+    let release!: () => void;
+    this.reportQueue = new Promise<void>((done) => {
+      release = done;
+    });
+    await previous;
+    try {
+      return await this.buildReport(actor, filters);
+    } finally {
+      release();
+    }
+  }
+
+  private async buildReport(
+    actor: Actor,
+    filters: AttendanceFiltersDto,
+  ): Promise<ReportRow[]> {
     if (actor.role !== 'manager') requireHr(actor);
     this.location.sweep();
-    const records = (
-      this.db
-        .prepare(
-          'SELECT * FROM attendance WHERE work_date >= ? AND work_date <= ?',
-        )
-        .all(filters.from, filters.to) as AttendanceRow[]
-    ).map(attendance);
     const employees = (
       actor.role === 'manager'
         ? this.employeesService.managedEmployees(actor)
@@ -164,14 +180,35 @@ export class AttendanceService {
         (!filters.employeeId || e.id === filters.employeeId) &&
         (!filters.department || e.department === filters.department),
     );
+    const employeeIds = JSON.stringify(
+      employees.map((employee) => employee.id),
+    );
+    const records = (
+      this.db
+        .prepare(
+          'SELECT * FROM attendance WHERE employee_id IN (SELECT value FROM json_each(?)) AND work_date >= ? AND work_date <= ?',
+        )
+        .all(employeeIds, filters.from, filters.to) as AttendanceRow[]
+    ).map(attendance);
+    const assigned = this.schedulesService.assignmentReader(
+      employees.map((employee) => employee.id),
+    );
+    const locations = this.location.views(
+      employees.map((employee) => employee.id),
+      filters.from,
+      filters.to,
+    );
+    const timezone = this.companyService.settings().timezone;
     const byKey = new Map(
       records.map((r) => [`${r.employeeId}:${r.workDate}`, r]),
     );
     const rows: ReportRow[] = [];
     const now = new Date();
     const timeOff = this.db
-      .prepare("SELECT data FROM employee_requests WHERE status = 'approved'")
-      .all()
+      .prepare(
+        "SELECT data FROM employee_requests WHERE status = 'approved' AND employee_id IN (SELECT value FROM json_each(?)) AND json_extract(data, '$.from') <= ? AND json_extract(data, '$.to') >= ?",
+      )
+      .all(employeeIds, filters.to, filters.from)
       .map((r) => JSON.parse(r.data as string) as EmployeeRequest)
       .filter(
         (r) =>
@@ -179,31 +216,44 @@ export class AttendanceService {
           r.type !== 'forgotten-check-out' &&
           r.type !== 'excuse',
       );
+    const timeOffByEmployee = new Map<string, EmployeeRequest[]>();
+    for (const request of timeOff) {
+      const requests = timeOffByEmployee.get(request.employeeId) ?? [];
+      requests.push(request);
+      timeOffByEmployee.set(request.employeeId, requests);
+    }
+    let processed = 0;
     for (
       let date = filters.from;
       date <= filters.to;
       date = shiftDate(date, 1)
     ) {
+      const day = weekday(date);
       for (const employee of employees) {
+        // Bound memory to one report and give sockets/writes time between batches.
+        if (processed++ % 1000 === 0) await setImmediate();
         const record = byKey.get(`${employee.id}:${date}`);
         if (
           !record &&
           (!employee.active ||
             employee.startDate > date ||
-            !this.schedulesService
-              .assignedSchedule(employee.id, date)
-              .days.includes(weekday(date)))
+            !assigned(employee.id, date).days.includes(day))
         )
           continue;
-        const approved = timeOff.find(
-          (r) =>
-            r.type !== 'forgotten-check-out' &&
-            r.employeeId === employee.id &&
-            r.from <= date &&
-            r.to >= date,
-        );
+        const approved = timeOffByEmployee
+          .get(employee.id)
+          ?.find(
+            (r) =>
+              r.type !== 'forgotten-check-out' &&
+              r.employeeId === employee.id &&
+              r.from <= date &&
+              r.to >= date,
+          );
+        const arrival = record ? arrivalStatus(record) : null;
         const status = record
-          ? attendanceStatus(record, now)
+          ? record.checkOut
+            ? arrival!
+            : attendanceStatus(record, now)
           : approved
             ? approved.type === 'leave'
               ? 'Approved leave'
@@ -222,7 +272,7 @@ export class AttendanceService {
           checkIn: record?.checkIn ?? null,
           checkOut: record?.checkOut ?? null,
           status,
-          late: record ? arrivalStatus(record) === 'Late' : false,
+          late: arrival === 'Late',
           hours: record?.checkOut
             ? Math.round(
                 ((Date.parse(record.checkOut) - Date.parse(record.checkIn)) /
@@ -230,8 +280,8 @@ export class AttendanceService {
                   100,
               ) / 100
             : null,
-          timezone: record?.timezone ?? this.companyService.settings().timezone,
-          location: record ? this.location.view(record.id) : null,
+          timezone: record?.timezone ?? timezone,
+          location: record ? (locations.get(record.id) ?? null) : null,
         });
       }
     }

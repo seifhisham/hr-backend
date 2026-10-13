@@ -25,10 +25,12 @@ export class SchedulesService {
   }
 
   schedules(): Schedule[] {
-    return this.db
-      .prepare('SELECT data FROM schedules ORDER BY rowid')
-      .all()
-      .map((r) => JSON.parse(r.data as string) as Schedule);
+    return this.store.cachedRead('schedules', () =>
+      this.db
+        .prepare('SELECT data FROM schedules ORDER BY rowid')
+        .all()
+        .map((r) => JSON.parse(r.data as string) as Schedule),
+    );
   }
 
   today() {
@@ -36,17 +38,22 @@ export class SchedulesService {
   }
 
   schedule(id: string, date?: string): Schedule {
-    if (date) {
-      const row = this.db
-        .prepare(
-          'SELECT data FROM schedule_versions WHERE schedule_id = ? AND effective_from <= ? ORDER BY effective_from DESC LIMIT 1',
-        )
-        .get(id, date);
-      if (row) return JSON.parse(row.data as string) as Schedule;
-    }
-    const value = this.schedules().find((s) => s.id === id);
-    if (!value) throw new BadRequestException('Schedule not found');
-    return value;
+    return this.store.cachedRead(
+      JSON.stringify(['schedule', id, date ?? null]),
+      () => {
+        if (date) {
+          const row = this.db
+            .prepare(
+              'SELECT data FROM schedule_versions WHERE schedule_id = ? AND effective_from <= ? ORDER BY effective_from DESC LIMIT 1',
+            )
+            .get(id, date);
+          if (row) return JSON.parse(row.data as string) as Schedule;
+        }
+        const value = this.schedules().find((s) => s.id === id);
+        if (!value) throw new BadRequestException('Schedule not found');
+        return value;
+      },
+    );
   }
 
   assignedSchedule(employeeId: string, date: string): Schedule {
@@ -64,6 +71,55 @@ export class SchedulesService {
     if (!row)
       throw new BadRequestException('Employee has no schedule assignment');
     return this.schedule(row.schedule_id as string, date);
+  }
+
+  assignmentReader(employeeIds: string[]) {
+    const assignments = new Map<
+      string,
+      { scheduleId: string; from: string }[]
+    >();
+    for (const row of this.db
+      .prepare(
+        'SELECT employee_id, schedule_id, effective_from FROM employee_schedules WHERE employee_id IN (SELECT value FROM json_each(?)) ORDER BY effective_from DESC',
+      )
+      .all(JSON.stringify(employeeIds))) {
+      const employeeId = row.employee_id as string;
+      const history = assignments.get(employeeId) ?? [];
+      history.push({
+        scheduleId: row.schedule_id as string,
+        from: row.effective_from as string,
+      });
+      assignments.set(employeeId, history);
+    }
+    const schedules = new Map(
+      this.schedules().map((schedule) => [schedule.id, schedule]),
+    );
+    const versions = new Map<string, { from: string; schedule: Schedule }[]>();
+    for (const row of this.db
+      .prepare(
+        'SELECT schedule_id, effective_from, data FROM schedule_versions WHERE schedule_id IN (SELECT schedule_id FROM employee_schedules WHERE employee_id IN (SELECT value FROM json_each(?))) ORDER BY effective_from DESC',
+      )
+      .all(JSON.stringify(employeeIds))) {
+      const scheduleId = row.schedule_id as string;
+      const history = versions.get(scheduleId) ?? [];
+      history.push({
+        from: row.effective_from as string,
+        schedule: JSON.parse(row.data as string) as Schedule,
+      });
+      versions.set(scheduleId, history);
+    }
+    return (employeeId: string, date: string): Schedule => {
+      const history = assignments.get(employeeId);
+      const assignment =
+        history?.find((value) => value.from <= date) ?? history?.at(-1);
+      if (!assignment)
+        throw new BadRequestException('Employee has no schedule assignment');
+      const schedule =
+        versions.get(assignment.scheduleId)?.find((value) => value.from <= date)
+          ?.schedule ?? schedules.get(assignment.scheduleId);
+      if (!schedule) throw new BadRequestException('Schedule not found');
+      return schedule;
+    };
   }
 
   currentWorkday(employeeId: string) {

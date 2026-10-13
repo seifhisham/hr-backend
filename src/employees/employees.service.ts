@@ -37,12 +37,12 @@ export class EmployeesService {
 
   employees(actor: Actor) {
     requireHr(actor);
-    return this.db
-      .prepare('SELECT data FROM employees ORDER BY code')
-      .all()
-      .map((r) =>
-        this.currentEmployee(JSON.parse(r.data as string) as Employee),
-      );
+    return this.currentEmployees(
+      this.db
+        .prepare('SELECT data FROM employees ORDER BY code')
+        .all()
+        .map((r) => JSON.parse(r.data as string) as Employee),
+    );
   }
 
   reports(actor: Actor) {
@@ -59,14 +59,14 @@ export class EmployeesService {
   managedEmployees(actor: Actor) {
     if (actor.role !== 'manager' || !actor.employeeId)
       throw new ForbiddenException('Manager access required');
-    return this.db
-      .prepare(
-        "SELECT data FROM employees WHERE json_extract(data, '$.managerId') = ? ORDER BY code",
-      )
-      .all(actor.employeeId)
-      .map((row) =>
-        this.currentEmployee(JSON.parse(row.data as string) as Employee),
-      );
+    return this.currentEmployees(
+      this.db
+        .prepare(
+          "SELECT data FROM employees WHERE json_extract(data, '$.managerId') = ? ORDER BY code",
+        )
+        .all(actor.employeeId)
+        .map((row) => JSON.parse(row.data as string) as Employee),
+    );
   }
 
   employee(id: string): Employee {
@@ -90,6 +90,19 @@ export class EmployeesService {
         this.schedulesService.today(),
       ).id,
     };
+  }
+
+  private currentEmployees(employees: Employee[]): Employee[] {
+    if (!employees.length) return [];
+    const today = this.schedulesService.today();
+    const assigned = this.schedulesService.assignmentReader(
+      employees.map((employee) => employee.id),
+    );
+    return employees.map((employee) => ({
+      ...employee,
+      salesEnabled: employee.salesEnabled ?? false,
+      scheduleId: assigned(employee.id, today).id,
+    }));
   }
 
   scheduleHistory(actor: Actor, id: string) {

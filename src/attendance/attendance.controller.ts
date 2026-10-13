@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Inject,
   Param,
@@ -27,6 +28,7 @@ import {
 } from './attendance-evidence.service.js';
 import { localTime } from './attendance-time.js';
 import { AttendanceService } from './attendance.service.js';
+import { AttendanceReportCompression } from './attendance-report-compression.interceptor.js';
 import {
   AttendanceLocationService,
   trackingPolicy,
@@ -132,8 +134,15 @@ export class AttendanceController {
     res.send(photo);
   }
 
-  @Get() report(@Req() req: AuthRequest, @Query() query: unknown) {
-    return this.attendanceService.report(req.actor, this.filters(query));
+  @Get()
+  @UseInterceptors(AttendanceReportCompression)
+  async report(@Req() req: AuthRequest, @Query() query: unknown) {
+    const rows = await this.attendanceService.report(
+      req.actor,
+      this.filters(query),
+    );
+    this.authorizeReport(req);
+    return rows;
   }
 
   @Post() manual(
@@ -153,13 +162,14 @@ export class AttendanceController {
     return this.attendanceService.correct(req.actor, parse(z.uuid(), id), body);
   }
 
-  @Get('export') export(
+  @Get('export') async export(
     @Req() req: AuthRequest,
     @Query() query: unknown,
     @Res() res: Response,
   ) {
     const filters = this.filters(query);
-    const rows = this.attendanceService.report(req.actor, filters);
+    const rows = await this.attendanceService.report(req.actor, filters);
+    this.authorizeReport(req);
     const cell = (value: string | number | null) => {
       const text = String(value ?? '');
       const safe = /^[\s]*[=+\-@]/.test(text) ? `'${text}` : text;
@@ -201,6 +211,15 @@ export class AttendanceController {
       `attachment; filename="attendance-${filters.from}-${filters.to}.csv"`,
     );
     res.send(`\uFEFF${csv}`);
+  }
+
+  private authorizeReport(req: AuthRequest) {
+    const current = this.authService.authenticate(req.sessionToken);
+    if (
+      current.role !== req.actor.role ||
+      current.employeeId !== req.actor.employeeId
+    )
+      throw new ForbiddenException('Your access changed. Sign in again.');
   }
 
   private filters(value: unknown) {

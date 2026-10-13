@@ -9,6 +9,7 @@ import { AttendanceEvidence } from './attendance-evidence.service.js';
 import { AttendanceController } from './attendance.controller.js';
 import { AttendanceService } from './attendance.service.js';
 import { AttendanceLocationService } from './attendance-location.service.js';
+import { AttendanceReportCompression } from './attendance-report-compression.interceptor.js';
 
 @Module({
   imports: [
@@ -20,7 +21,12 @@ import { AttendanceLocationService } from './attendance-location.service.js';
     AuthModule,
   ],
   controllers: [AttendanceController],
-  providers: [AttendanceService, AttendanceEvidence, AttendanceLocationService],
+  providers: [
+    AttendanceService,
+    AttendanceEvidence,
+    AttendanceLocationService,
+    AttendanceReportCompression,
+  ],
   exports: [AttendanceService],
 })
 export class AttendanceModule {}

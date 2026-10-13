@@ -51,19 +51,11 @@ export class SalesService {
   private scope(actor: Actor, own: boolean): Employee[] {
     if (own)
       return actor.employeeId ? [this.employees.employeeActor(actor)] : [];
-    const managed = this.managedEmployees(actor);
     if (actor.role === 'employee')
       throw new ForbiddenException('Sales review access required');
-    return this.db
-      .prepare('SELECT id FROM employees ORDER BY code')
-      .all()
-      .map((row) => this.employees.employee(row.id as string))
-      .filter(
-        (employee) =>
-          actor.role === 'hr' ||
-          actor.role === 'admin' ||
-          managed.includes(employee.id),
-      );
+    return actor.role === 'manager'
+      ? this.employees.managedEmployees(actor)
+      : this.employees.employees(actor);
   }
   private canReview(actor: Actor, employee: Employee) {
     return (
@@ -117,28 +109,41 @@ export class SalesService {
     return this.present(actor, activity);
   }
   list(actor: Actor, filters: SalesFilters, own = false) {
-    const allowed = new Set(
+    const allowed = new Map(
       this.scope(actor, own)
         .filter(
           (employee) =>
             (!filters.employeeId || employee.id === filters.employeeId) &&
             (!filters.department || employee.department === filters.department),
         )
-        .map((employee) => employee.id),
+        .map((employee) => [employee.id, employee]),
     );
-    return this.db
-      .prepare(
-        "SELECT data FROM sales_activities WHERE activity_date >= ? AND activity_date < date(?, '+1 month') ORDER BY activity_date DESC, rowid DESC",
-      )
-      .all(`${filters.month}-01`, `${filters.month}-01`)
-      .map((row) => JSON.parse(row.data as string) as SalesActivity)
+    return this.activities(filters.month, [...allowed.keys()])
       .filter(
         (activity) =>
-          allowed.has(activity.employeeId) &&
           (!filters.kind || activity.kind === filters.kind) &&
           (!filters.status || activity.status === filters.status),
       )
-      .map((activity) => this.present(actor, activity));
+      .map((activity) => {
+        const employee = allowed.get(activity.employeeId)!;
+        return {
+          ...activity,
+          employeeName: employee.name,
+          employeeNumber: employee.employeeNumber,
+          department: employee.department,
+          canReview:
+            employee.id !== actor.employeeId && actor.role !== 'employee',
+        };
+      });
+  }
+  private activities(month: string, employeeIds: string[]): SalesActivity[] {
+    if (!employeeIds.length) return [];
+    return this.db
+      .prepare(
+        "SELECT data FROM sales_activities WHERE activity_date >= ? AND activity_date < date(?, '+1 month') AND employee_id IN (SELECT value FROM json_each(?)) ORDER BY activity_date DESC, rowid DESC",
+      )
+      .all(`${month}-01`, `${month}-01`, JSON.stringify(employeeIds))
+      .map((row) => JSON.parse(row.data as string) as SalesActivity);
   }
   private write(activity: SalesActivity) {
     try {
@@ -321,87 +326,99 @@ export class SalesService {
     filters: Pick<SalesFilters, 'month' | 'department' | 'employeeId'>,
     own = false,
   ) {
-    // ponytail: in-memory monthly summaries suit fewer than 100 employees; use SQL aggregation if volume grows.
-    const activities = this.list(actor, { month: filters.month }, own);
-    return this.scope(actor, own)
-      .filter(
-        (employee) =>
-          employee.startDate.slice(0, 7) <= filters.month &&
-          (!filters.department || employee.department === filters.department) &&
-          (!filters.employeeId || employee.id === filters.employeeId),
-      )
-      .flatMap((employee) => {
-        const entries = activities.filter(
-          (activity) => activity.employeeId === employee.id,
-        );
-        const target = this.target(employee.id, filters.month);
-        if (!employee.salesEnabled && !entries.length && !target) return [];
-        const verified = entries.filter(
-          (activity) => activity.status === 'verified',
-        );
-        const meetings = verified.filter(
-          (activity) => activity.kind === 'meeting',
-        ).length;
-        const viewings = verified.filter(
-          (activity) => activity.kind === 'viewing',
-        ).length;
-        const deals = verified.filter(
-          (activity) => activity.kind === 'closed-deal',
-        );
-        const cents = new Map<string, number>();
-        for (const deal of deals)
-          if (deal.kind === 'closed-deal')
-            cents.set(
-              deal.currency,
-              (cents.get(deal.currency) ?? 0) + Math.round(deal.value * 100),
-            );
-        const values = Object.fromEntries(
-          [...cents.entries()]
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([currency, value]) => [currency, value / 100]),
-        );
-        const percentage = (actual: number, goal: number | undefined | null) =>
-          goal ? Math.round((actual / goal) * 1000) / 10 : null;
-        return [
-          {
-            employeeId: employee.id,
-            employeeName: employee.name,
-            employeeNumber: employee.employeeNumber,
-            department: employee.department,
-            active: employee.active,
-            salesEnabled: employee.salesEnabled,
-            month: filters.month,
-            meetings,
-            viewings,
-            meetingTotal: meetings + viewings,
-            deals: deals.length,
-            sales: deals.filter(
-              (activity) =>
-                activity.kind === 'closed-deal' &&
-                activity.transactionType === 'sale',
-            ).length,
-            leases: deals.filter(
-              (activity) =>
-                activity.kind === 'closed-deal' &&
-                activity.transactionType === 'lease',
-            ).length,
-            transactionValues: values,
-            pending: entries.filter((activity) => activity.status === 'pending')
-              .length,
-            returned: entries.filter(
-              (activity) => activity.status === 'returned',
-            ).length,
-            target,
-            achievement: {
-              meetings: percentage(meetings + viewings, target?.meetings),
-              deals: percentage(deals.length, target?.deals),
-              transactionValue: percentage(
-                target?.currency ? (values[target.currency] ?? 0) : 0,
-                target?.transactionValue,
-              ),
-            },
+    const employees = this.scope(actor, own).filter(
+      (employee) =>
+        employee.startDate.slice(0, 7) <= filters.month &&
+        (!filters.department || employee.department === filters.department) &&
+        (!filters.employeeId || employee.id === filters.employeeId),
+    );
+    const employeeIds = employees.map((employee) => employee.id);
+    const byEmployee = new Map<string, SalesActivity[]>();
+    for (const activity of this.activities(filters.month, employeeIds)) {
+      const entries = byEmployee.get(activity.employeeId) ?? [];
+      entries.push(activity);
+      byEmployee.set(activity.employeeId, entries);
+    }
+    const targets = new Map(
+      this.db
+        .prepare(
+          'SELECT employee_id, data FROM sales_targets WHERE month = ? AND employee_id IN (SELECT value FROM json_each(?))',
+        )
+        .all(filters.month, JSON.stringify(employeeIds))
+        .map((row) => [
+          row.employee_id as string,
+          JSON.parse(row.data as string) as SalesTarget,
+        ]),
+    );
+    return employees.flatMap((employee) => {
+      const entries = byEmployee.get(employee.id) ?? [];
+      const target = targets.get(employee.id) ?? null;
+      if (!employee.salesEnabled && !entries.length && !target) return [];
+      const verified = entries.filter(
+        (activity) => activity.status === 'verified',
+      );
+      const meetings = verified.filter(
+        (activity) => activity.kind === 'meeting',
+      ).length;
+      const viewings = verified.filter(
+        (activity) => activity.kind === 'viewing',
+      ).length;
+      const deals = verified.filter(
+        (activity) => activity.kind === 'closed-deal',
+      );
+      const cents = new Map<string, number>();
+      for (const deal of deals)
+        if (deal.kind === 'closed-deal')
+          cents.set(
+            deal.currency,
+            (cents.get(deal.currency) ?? 0) + Math.round(deal.value * 100),
+          );
+      const values = Object.fromEntries(
+        [...cents.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([currency, value]) => [currency, value / 100]),
+      );
+      const percentage = (actual: number, goal: number | undefined | null) =>
+        goal ? Math.round((actual / goal) * 1000) / 10 : null;
+      return [
+        {
+          employeeId: employee.id,
+          employeeName: employee.name,
+          employeeNumber: employee.employeeNumber,
+          department: employee.department,
+          active: employee.active,
+          salesEnabled: employee.salesEnabled,
+          month: filters.month,
+          meetings,
+          viewings,
+          meetingTotal: meetings + viewings,
+          deals: deals.length,
+          sales: deals.filter(
+            (activity) =>
+              activity.kind === 'closed-deal' &&
+              activity.transactionType === 'sale',
+          ).length,
+          leases: deals.filter(
+            (activity) =>
+              activity.kind === 'closed-deal' &&
+              activity.transactionType === 'lease',
+          ).length,
+          transactionValues: values,
+          pending: entries.filter((activity) => activity.status === 'pending')
+            .length,
+          returned: entries.filter((activity) => activity.status === 'returned')
+            .length,
+          target,
+          achievement: {
+            meetings: percentage(meetings + viewings, target?.meetings),
+            deals: percentage(deals.length, target?.deals),
+            transactionValue: percentage(
+              target?.currency ? (values[target.currency] ?? 0) : 0,
+              target?.transactionValue,
+            ),
           },
-        ];
-      });
+        },
+      ];
+    });
   }
 }

@@ -118,8 +118,25 @@ export class AttendanceLocationService
   }
   view(id: string) {
     const state = this.load(id);
+    return this.present(state, Date.now());
+  }
+  views(employeeIds: string[], from: string, to: string) {
+    const now = Date.now();
+    return new Map(
+      this.store.db
+        .prepare(
+          'SELECT l.attendance_id, l.data FROM attendance_location l JOIN attendance a ON a.id = l.attendance_id WHERE a.employee_id IN (SELECT value FROM json_each(?)) AND a.work_date >= ? AND a.work_date <= ?',
+        )
+        .all(JSON.stringify(employeeIds), from, to)
+        .map((row) => [
+          row.attendance_id as string,
+          this.present(JSON.parse(row.data as string) as Tracking, now),
+        ]),
+    );
+  }
+  private present(state: Tracking | null, now: number) {
     if (!state) return null;
-    if (state.status !== 'auto-checked-out' && this.stale(state, Date.now()))
+    if (state.status !== 'auto-checked-out' && this.stale(state, now))
       this.unavailable(state);
     return this.publicState(state);
   }
@@ -236,7 +253,8 @@ export class AttendanceLocationService
           );
           state.returnBy = null;
         }
-        if (JSON.stringify(state) !== row.data) this.save(row.id as string, state);
+        if (JSON.stringify(state) !== row.data)
+          this.save(row.id as string, state);
       }
     });
   }
