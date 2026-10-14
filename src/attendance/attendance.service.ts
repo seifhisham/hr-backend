@@ -97,12 +97,19 @@ export class AttendanceService {
       if (
         this.db
           .prepare(
-            'SELECT id FROM attendance WHERE employee_id = ? AND check_out IS NULL',
+            `SELECT a.id FROM attendance a
+             WHERE a.employee_id = ? AND a.check_out IS NULL
+               AND (a.work_date >= ? OR NOT EXISTS (
+                 SELECT 1 FROM employee_requests r
+                 WHERE r.employee_id = a.employee_id AND r.status = 'pending'
+                   AND json_extract(r.data, '$.type') = 'forgotten-check-out'
+                   AND json_extract(r.data, '$.attendanceId') = a.id
+               ))`,
           )
-          .get(employee.id)
+          .get(employee.id, date)
       )
         throw new ConflictException(
-          'A previous attendance record is still open. Ask HR to correct it.',
+          'A previous attendance record is still open. Submit a forgotten check-out request or ask HR to correct it.',
         );
       const record: Attendance = {
         id: randomUUID(),
@@ -125,6 +132,13 @@ export class AttendanceService {
         );
       this.evidence.save(record.id, 'check-in', evidence, record.checkIn);
       this.location.start(record.id, actor);
+      this.auditService.record(
+        actor,
+        'attendance.checked_in',
+        record.id,
+        null,
+        record,
+      );
       return record;
     });
   }
@@ -137,13 +151,22 @@ export class AttendanceService {
         .get(id, employee.id) as AttendanceRow | undefined;
       if (!row) throw new NotFoundException('Attendance record not found');
       if (row.check_out) return attendance(row);
+      const before = attendance(row);
       row.check_out = new Date().toISOString();
       this.db
         .prepare('UPDATE attendance SET check_out = ? WHERE id = ?')
         .run(row.check_out, row.id);
       this.evidence.save(row.id, 'check-out', evidence, row.check_out);
       this.location.reset(row.id);
-      return attendance(row);
+      const after = attendance(row);
+      this.auditService.record(
+        actor,
+        'attendance.checked_out',
+        row.id,
+        before,
+        after,
+      );
+      return after;
     });
   }
 

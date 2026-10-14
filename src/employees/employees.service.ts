@@ -37,12 +37,16 @@ export class EmployeesService {
 
   employees(actor: Actor) {
     requireHr(actor);
+    const accounts = new Map(
+      this.db.prepare('SELECT id, employee_id FROM users WHERE employee_id IS NOT NULL').all()
+        .map((row) => [row.employee_id as string, row.id as string]),
+    );
     return this.currentEmployees(
       this.db
         .prepare('SELECT data FROM employees ORDER BY code')
         .all()
         .map((r) => JSON.parse(r.data as string) as Employee),
-    );
+    ).map((employee) => ({ ...employee, accountId: accounts.get(employee.id) ?? null }));
   }
 
   reports(actor: Actor) {

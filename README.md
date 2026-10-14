@@ -115,3 +115,28 @@ After building, pass a JSON path to `node test/attendance-load.mjs` to preserve 
 This is a local backend benchmark with fresh employees and no pre-existing attendance/photo history, not a production capacity guarantee or a test of mobile network speeds. It measures attendance writes separately from reports; mixed read/write contention is not tested. Run it on the intended server before choosing a response-time target. Photos are synthetic noise images, not real location proof, and their sizes/processing characteristics may differ from actual camera photos.
 
 This structure follows [Nest's feature-module conventions](https://docs.nestjs.com/modules). HTTPS hosting, backups, retention policy, and pilot acceptance remain deployment work, not part of this structural refactor.
+
+
+## Expensive endpoint limits
+
+Authenticated accounts share fixed-window budgets across routes in each category:
+
+| Category | Requests | Window | Routes |
+| --- | --- | --- | --- |
+| Reports | 60 | 1 minute | Attendance report, sales activity lists/performance (team and personal), payroll preview/run/deductions |
+| Exports | 10 | 1 minute | Attendance and sales CSV exports |
+| Photos | 10 | 1 minute | Attendance check-in and check-out, combined |
+| Passwords | 5 | 15 minutes | Password change |
+
+Limits run after authentication and before multipart parsing, image processing, validation, or service work. Invalid attempts consume budget too. Rejected attempts receive HTTP 429 and a `Retry-After` header in seconds. Categories and accounts are independent; new sessions and query/record-ID changes do not reset a budget. Routine profile, policy, location updates, login, and logout are unaffected. Existing account-based login throttling remains separate.
+
+Counters are process-local, expire on demand, and reset on restart. Deploy with one backend instance; replace counters with shared atomic storage before adding replicas. These account limits supplement, rather than replace, perimeter/IP limits and per-request workload bounds. Tune the constants in `src/common/security/rate-limit.guard.ts` using real deployment traffic.
+
+
+## Searchable activity log
+
+HR/admin can query `GET /api/audit` with `search`, exact `action`, exact `recordId` (including department names and payroll months), exact `actorId`, `from`, `to`, `limit` (1–100, default 50), and `before` (an audit event UUID). Dates include the selected UTC days; displayed times use the company timezone. Search matches actor identity, action, record ID, reason, and saved before/after values. Results remain an array in newest insertion order for compatibility with existing record-history consumers.
+
+The activity-log page uses 50 rows plus one lookahead row to enable Next only when an older matching entry exists. Cursor navigation remains stable as new events are inserted. Filters reset navigation; details display the actor account ID, event ID, reason, and snapshots. The endpoint uses the shared report rate limit.
+
+Successful sign-in/sign-out and actual employee check-in/check-out transitions are now audited. Duplicate attendance retries do not create duplicate transition events. Passwords, tokens, and raw photo data are not added to these events. Existing employee, request, payroll, sales, schedule, department, company, password, and automatic checkout events remain unchanged. Historical actions that were never logged are not backfilled. Failed authentication and read access are not newly logged by this change.

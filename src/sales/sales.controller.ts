@@ -1,3 +1,4 @@
+import { RateLimit } from '../common/security/rate-limit.guard.js';
 import {
   Body,
   Controller,
@@ -30,10 +31,14 @@ export class SalesController {
   @Get('access') access(@Req() req: AuthRequest) {
     return this.sales.access(req.actor);
   }
-  @Get('activities/me') own(@Req() req: AuthRequest, @Query() query: unknown) {
+  @RateLimit('reports')
+  @Get('activities/me')
+  own(@Req() req: AuthRequest, @Query() query: unknown) {
     return this.sales.list(req.actor, parse(filtersSchema, query), true);
   }
-  @Get('activities') list(@Req() req: AuthRequest, @Query() query: unknown) {
+  @RateLimit('reports')
+  @Get('activities')
+  list(@Req() req: AuthRequest, @Query() query: unknown) {
     return this.sales.list(req.actor, parse(filtersSchema, query));
   }
   @Get('activities/:id') get(@Req() req: AuthRequest, @Param('id') id: string) {
@@ -67,20 +72,18 @@ export class SalesController {
   ) {
     return this.sales.review(req.actor, parse(z.uuid(), id), body);
   }
-  @Get('performance/me') ownPerformance(
-    @Req() req: AuthRequest,
-    @Query() query: unknown,
-  ) {
+  @RateLimit('reports')
+  @Get('performance/me')
+  ownPerformance(@Req() req: AuthRequest, @Query() query: unknown) {
     return this.sales.performance(
       req.actor,
       parse(filtersSchema.pick({ month: true }), query),
       true,
     );
   }
-  @Get('performance') performance(
-    @Req() req: AuthRequest,
-    @Query() query: unknown,
-  ) {
+  @RateLimit('reports')
+  @Get('performance')
+  performance(@Req() req: AuthRequest, @Query() query: unknown) {
     return this.sales.performance(
       req.actor,
       parse(filtersSchema.omit({ kind: true, status: true }), query),
@@ -93,7 +96,9 @@ export class SalesController {
   ) {
     return this.sales.saveTarget(req.actor, body);
   }
-  @Get('export') export(
+  @RateLimit('exports')
+  @Get('export')
+  export(
     @Req() req: AuthRequest,
     @Query() query: unknown,
     @Res() res: Response,

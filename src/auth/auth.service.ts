@@ -65,13 +65,22 @@ export class AuthService {
     this.db
       .prepare('DELETE FROM sessions WHERE expires <= ?')
       .run(new Date().toISOString());
-    this.db
-      .prepare('INSERT INTO sessions VALUES (?, ?, ?)')
-      .run(
-        tokenHash(token),
+    this.store.transaction(() => {
+      this.db
+        .prepare('INSERT INTO sessions VALUES (?, ?, ?)')
+        .run(
+          tokenHash(token),
+          user.id,
+          new Date(now + 12 * 3600000).toISOString(),
+        );
+      this.auditService.record(
+        this.actor(user),
+        'account.signed_in',
         user.id,
-        new Date(now + 12 * 3600000).toISOString(),
+        null,
+        null,
       );
+    });
     return { token, user: this.actor(user) };
   }
 
@@ -86,9 +95,19 @@ export class AuthService {
   }
 
   logout(token: string) {
-    this.db
-      .prepare('DELETE FROM sessions WHERE hash = ?')
-      .run(tokenHash(token));
+    const actor = this.authenticate(token);
+    this.store.transaction(() => {
+      this.db
+        .prepare('DELETE FROM sessions WHERE hash = ?')
+        .run(tokenHash(token));
+      this.auditService.record(
+        actor,
+        'account.signed_out',
+        actor.id,
+        null,
+        null,
+      );
+    });
   }
 
   private actor(user: User): Actor {

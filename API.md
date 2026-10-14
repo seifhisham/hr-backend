@@ -109,7 +109,7 @@ Attendance record:
 }
 ```
 
-Do not display a success state before the API responds successfully. If a response is lost, repeat with valid recent evidence or fetch `/attendance/me` to reconcile. Retries preserve the original timestamp and evidence. A previous workday left open causes check-in to return 409 and needs HR review. Network failures do not queue offline submissions in this phase.
+Do not display a success state before the API responds successfully. If a response is lost, repeat with valid recent evidence or fetch `/attendance/me` to reconcile. Retries preserve the original timestamp and evidence. A previous workday left open causes check-in to return 409 unless each earlier open record has an owned, overall `pending` forgotten-check-out request referencing its exact `attendanceId`. Submission allows a new workday without closing or changing the earlier record; final HR approval still applies the correction. Rejected or withdrawn requests do not qualify, regardless of manager recommendation. Refresh `/attendance/me` and paginated `/requests/me` after request changes. Check-out and location monitoring must target the current `workDate` record, not an arbitrary open record. One interval per workday remains enforced. Network failures do not queue offline submissions in this phase.
 
 ## Employee Requests and HR Decisions
 

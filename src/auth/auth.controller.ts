@@ -1,3 +1,4 @@
+import { RateLimit } from '../common/security/rate-limit.guard.js';
 import { Body, Controller, Get, Inject, Post, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { localTime } from '../attendance/attendance-time.js';
@@ -68,7 +69,9 @@ export class AuthController {
     };
   }
 
-  @Post('password') password(
+  @RateLimit('passwords')
+  @Post('password')
+  password(
     @Req() req: AuthRequest,
     @Body(new ZodValidationPipe(changePasswordSchema)) body: ChangePasswordDto,
   ) {

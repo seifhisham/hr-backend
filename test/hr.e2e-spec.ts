@@ -3149,6 +3149,9 @@ describe('HR REST API', () => {
       .exec(`CREATE TEMP TRIGGER fail_decision_audit BEFORE INSERT ON audit
       WHEN NEW.action = 'request.approved' BEGIN SELECT RAISE(ABORT, 'Audit failed'); END;`);
     const authService = app.get(AuthService);
+    const auditBefore = app
+      .get(AuditService)
+      .auditHistory(authService.authenticate(adminToken), record.id);
     expect(() =>
       app
         .get(RequestsService)
@@ -3172,10 +3175,16 @@ describe('HR REST API', () => {
       app
         .get(AuditService)
         .auditHistory(authService.authenticate(adminToken), record.id),
-    ).toEqual([]);
+    ).toEqual(auditBefore);
   });
 
   it('requires authentication, isolates employee access, and permits cookie sessions', async () => {
+    const directory = await request(server()).get('/api/employees').set(auth(adminToken)).expect(200);
+    const linked = directory.body.find((row: { id: string }) => row.id === employee.id);
+    expect(linked.accountId).toBe(app.get(AuthService).authenticate(employeeToken).id);
+    expect(linked.accountId).not.toBe(employee.id);
+    expect(linked).not.toHaveProperty('password_hash');
+
     await request(server()).get('/api/health').expect(200, { status: 'ok' });
     for (const route of [
       '/api/schedules',
@@ -3425,6 +3434,15 @@ describe('HR REST API', () => {
         .expect(200)
     ).body;
     expect(evidence).toHaveLength(2);
+    const attendanceAudit = app
+      .get(AuditService)
+      .auditHistory(app.get(AuthService).authenticate(adminToken), record.id);
+    expect(attendanceAudit.map((entry) => entry.action)).toEqual([
+      'attendance.checked_out',
+      'attendance.checked_in',
+    ]);
+    expect(attendanceAudit[0].before).toMatchObject({ checkOut: null });
+    expect(attendanceAudit[0].after).toMatchObject({ id: record.id });
     expect(evidence[0].policy.radiusMeters).toBe(50);
     expect(evidence[0].distanceMeters).toBe(0);
     await request(server()).get(`${path}/photos/check-in`).expect(401);
@@ -3609,6 +3627,104 @@ describe('HR REST API', () => {
       })
       .expect(400);
   });
+
+  it.each(['withdrawn', 'rejected', 'approved'])(
+    'allows a new workday with a pending forgotten check-out, then handles %s',
+    async (status) => {
+      const db = app.get(DatabaseService).db;
+      db.exec(
+        'CREATE UNIQUE INDEX one_open_interval ON attendance(employee_id) WHERE check_out IS NULL',
+      );
+      db.exec(DATABASE_SCHEMA);
+      expect(
+        db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE name = 'one_open_interval'",
+          )
+          .get(),
+      ).toBeUndefined();
+      const yesterday = (
+        await submit('/api/attendance/check-in', employeeToken).expect(201)
+      ).body;
+      vi.setSystemTime(new Date('2026-10-05T07:00:00Z'));
+      employeeToken = (
+        await request(server())
+          .post('/api/auth/login')
+          .send({ email: employee.email, password: employeePassword })
+      ).body.token;
+      await submit('/api/attendance/check-in', employeeToken).expect(409);
+      const pending = (
+        await request(server())
+          .post('/api/requests')
+          .set(auth(employeeToken))
+          .send({
+            type: 'forgotten-check-out',
+            attendanceId: yesterday.id,
+            proposedCheckOut: '2026-10-04T15:00:00Z',
+            reason: 'Forgot to record departure',
+          })
+          .expect(201)
+      ).body;
+      const today = (
+        await submit('/api/attendance/check-in', employeeToken).expect(201)
+      ).body;
+      expect(today.id).not.toBe(yesterday.id);
+      expect(today.workDate).toBe('2026-10-05');
+      expect(
+        (await submit('/api/attendance/check-in', employeeToken).expect(201))
+          .body.id,
+      ).toBe(today.id);
+      const records = (
+        await request(server())
+          .get('/api/attendance/me')
+          .set(auth(employeeToken))
+          .expect(200)
+      ).body.records;
+      expect(
+        records.find((r: { id: string }) => r.id === yesterday.id).checkOut,
+      ).toBeNull();
+      adminToken = (
+        await request(server())
+          .post('/api/auth/login')
+          .send({ email: 'admin@test.local', password: adminPassword })
+      ).body.token;
+      if (status === 'withdrawn') {
+        await request(server())
+          .patch(`/api/requests/${pending.id}/withdraw`)
+          .set(auth(employeeToken))
+          .send({ reason: 'Replace incorrect departure request' })
+          .expect(200);
+      } else {
+        await request(server())
+          .patch(`/api/requests/${pending.id}/decision`)
+          .set(auth(adminToken))
+          .send({ status, reason: 'HR reviewed departure request' })
+          .expect(200);
+      }
+      const after = (
+        await request(server())
+          .get('/api/attendance/me')
+          .set(auth(employeeToken))
+          .expect(200)
+      ).body.records;
+      expect(
+        after.find((r: { id: string }) => r.id === yesterday.id).checkOut,
+      ).toBe(status === 'approved' ? '2026-10-04T15:00:00.000Z' : null);
+      await submit(
+        `/api/attendance/${today.id}/check-out`,
+        employeeToken,
+      ).expect(201);
+      vi.setSystemTime(new Date('2026-10-06T07:00:00Z'));
+      employeeToken = (
+        await request(server())
+          .post('/api/auth/login')
+          .send({ email: employee.email, password: employeePassword })
+      ).body.token;
+      await submit('/api/attendance/check-in', employeeToken).expect(
+        status === 'approved' ? 201 : 409,
+      );
+    },
+  );
 
   it('flags missing check-outs and prevents a second open workday', async () => {
     await submit('/api/attendance/check-in', employeeToken).expect(201);

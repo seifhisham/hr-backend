@@ -1,3 +1,4 @@
+import { RateLimit } from '../common/security/rate-limit.guard.js';
 import {
   payrollApprovalSchema,
   type ApprovePayrollDto,
@@ -28,6 +29,7 @@ export class PayrollController {
     @Inject(PayrollService) private readonly payrollService: PayrollService,
   ) {}
 
+  @RateLimit('reports')
   @Get()
   preview(@Req() req: AuthRequest, @Query('month') month: unknown) {
     return this.payrollService.preview(
@@ -35,7 +37,9 @@ export class PayrollController {
       parse(payrollMonthSchema, month),
     );
   }
-  @Get('run') run(@Req() req: AuthRequest, @Query('month') month: unknown) {
+  @RateLimit('reports')
+  @Get('run')
+  run(@Req() req: AuthRequest, @Query('month') month: unknown) {
     return this.payrollService.run(req.actor, parse(payrollMonthSchema, month));
   }
   @Post('approve') approve(
@@ -44,6 +48,7 @@ export class PayrollController {
   ) {
     return this.payrollService.approve(req.actor, body);
   }
+  @RateLimit('reports')
   @Get('deductions')
   deductions(@Req() req: AuthRequest, @Query() query: unknown) {
     return this.payrollService.deductions(

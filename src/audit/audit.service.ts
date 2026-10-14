@@ -1,3 +1,4 @@
+import type { AuditQuery } from './audit.dto.js';
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { requireHr } from '../common/security/permissions.js';
@@ -13,32 +14,60 @@ export class AuditService {
     return this.store.db;
   }
 
-  auditHistory(actor: Actor, recordId?: string) {
+  auditHistory(actor: Actor, recordId?: string, query?: AuditQuery) {
     requireHr(actor);
-    return (
-      recordId
-        ? this.db
-            .prepare(
-              'SELECT * FROM audit WHERE record_id = ? ORDER BY rowid DESC LIMIT 100',
-            )
-            .all(recordId)
-        : this.db
-            .prepare('SELECT * FROM audit ORDER BY rowid DESC LIMIT 100')
-            .all()
-    ).map((r) => ({
-      id: r.id,
-      actor: r.actor_name,
-      action: r.action,
-      recordId: r.record_id,
-      at: r.at,
-      reason: r.reason,
-      before: r.before_data
-        ? (JSON.parse(r.before_data as string) as unknown)
-        : null,
-      after: r.after_data
-        ? (JSON.parse(r.after_data as string) as unknown)
-        : null,
-    }));
+    const clauses: string[] = [];
+    const values: (string | number)[] = [];
+    for (const [column, value] of [
+      ['record_id', recordId],
+      ['action', query?.action],
+      ['actor_id', query?.actorId],
+    ]) {
+      if (value) {
+        clauses.push(`${column} = ?`);
+        values.push(value);
+      }
+    }
+    if (query?.before) {
+      clauses.push('rowid < (SELECT rowid FROM audit WHERE id = ?)');
+      values.push(query.before);
+    }
+    if (query?.from) {
+      clauses.push('at >= ?');
+      values.push(`${query.from}T00:00:00.000Z`);
+    }
+    if (query?.to) {
+      clauses.push('at < ?');
+      values.push(
+        new Date(Date.parse(`${query.to}T00:00:00Z`) + 86400000).toISOString(),
+      );
+    }
+    if (query?.search) {
+      clauses.push(
+        "instr(lower(actor_name || ' ' || actor_id || ' ' || action || ' ' || record_id || ' ' || coalesce(reason, '') || ' ' || coalesce(before_data, '') || ' ' || coalesce(after_data, '')), lower(?)) > 0",
+      );
+      values.push(query.search);
+    }
+    return this.db
+      .prepare(
+        `SELECT * FROM audit ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY rowid DESC LIMIT ?`,
+      )
+      .all(...values, query?.limit ?? 100)
+      .map((r) => ({
+        id: r.id,
+        actor: r.actor_name,
+        actorId: r.actor_id,
+        action: r.action,
+        recordId: r.record_id,
+        at: r.at,
+        reason: r.reason,
+        before: r.before_data
+          ? (JSON.parse(r.before_data as string) as unknown)
+          : null,
+        after: r.after_data
+          ? (JSON.parse(r.after_data as string) as unknown)
+          : null,
+      }));
   }
 
   record(

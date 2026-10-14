@@ -1,3 +1,4 @@
+import { RateLimit } from '../common/security/rate-limit.guard.js';
 import {
   Body,
   Controller,
@@ -80,6 +81,7 @@ export class AttendanceController {
     return this.location.update(req.actor, parse(z.uuid(), id), body);
   }
 
+  @RateLimit('photos')
   @Post('check-in')
   @UseInterceptors(attendanceUpload())
   async checkIn(
@@ -94,6 +96,7 @@ export class AttendanceController {
     );
   }
 
+  @RateLimit('photos')
   @Post(':id/check-out')
   @UseInterceptors(attendanceUpload())
   async checkOut(
@@ -134,6 +137,7 @@ export class AttendanceController {
     res.send(photo);
   }
 
+  @RateLimit('reports')
   @Get()
   @UseInterceptors(AttendanceReportCompression)
   async report(@Req() req: AuthRequest, @Query() query: unknown) {
@@ -162,7 +166,9 @@ export class AttendanceController {
     return this.attendanceService.correct(req.actor, parse(z.uuid(), id), body);
   }
 
-  @Get('export') async export(
+  @RateLimit('exports')
+  @Get('export')
+  async export(
     @Req() req: AuthRequest,
     @Query() query: unknown,
     @Res() res: Response,

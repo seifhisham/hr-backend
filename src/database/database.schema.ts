@@ -49,7 +49,7 @@ export const DATABASE_SCHEMA = `
         schedule TEXT NOT NULL, timezone TEXT NOT NULL,
         UNIQUE(employee_id, work_date)
       );
-      CREATE UNIQUE INDEX IF NOT EXISTS one_open_interval ON attendance(employee_id) WHERE check_out IS NULL;
+      DROP INDEX IF EXISTS one_open_interval;
       CREATE TABLE IF NOT EXISTS attendance_evidence (
         attendance_id TEXT NOT NULL REFERENCES attendance(id),
         event TEXT NOT NULL CHECK(event IN ('check-in', 'check-out')),
@@ -77,6 +77,9 @@ export const DATABASE_SCHEMA = `
       CREATE INDEX IF NOT EXISTS requests_by_status ON employee_requests(status);
       CREATE INDEX IF NOT EXISTS pending_requests_by_employee ON employee_requests(employee_id) WHERE status = 'pending';
       CREATE INDEX IF NOT EXISTS audit_by_record ON audit(record_id);
+      CREATE INDEX IF NOT EXISTS audit_by_actor ON audit(actor_id);
+      CREATE INDEX IF NOT EXISTS audit_by_action ON audit(action);
+      CREATE INDEX IF NOT EXISTS audit_by_date ON audit(at);
       CREATE INDEX IF NOT EXISTS audit_request_notifications ON audit(json_extract(after_data, '$.employeeId'))
         WHERE action IN ('request.approved', 'request.rejected', 'request.reopened', 'request.manager_reviewed');
       CREATE TABLE IF NOT EXISTS payroll_runs (
