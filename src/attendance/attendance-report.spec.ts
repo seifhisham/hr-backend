@@ -23,10 +23,10 @@ it('yields to other work without mixing employee snapshots and keeps report quer
     company = new CompanyService(store, audit);
   const schedules = new SchedulesService(store, audit, company);
   const employees = new EmployeesService(store, schedules, audit);
-  const location = new AttendanceLocationService(store, employees, audit);
+  const location = new AttendanceLocationService(company, store, employees, audit);
   const attendance = new AttendanceService(
     store,
-    new AttendanceEvidence(store),
+    new AttendanceEvidence(company, store),
     employees,
     schedules,
     company,

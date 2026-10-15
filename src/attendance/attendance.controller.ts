@@ -32,7 +32,6 @@ import { AttendanceService } from './attendance.service.js';
 import { AttendanceReportCompression } from './attendance-report-compression.interceptor.js';
 import {
   AttendanceLocationService,
-  trackingPolicy,
 } from './attendance-location.service.js';
 import {
   correctionSchema,
@@ -69,7 +68,7 @@ export class AttendanceController {
   }
 
   @Get('policy') policy() {
-    return { ...officePolicy, tracking: trackingPolicy };
+    return { ...officePolicy, ...this.companyService.settings(), tracking: this.location.policy() };
   }
 
   @Post(':id/location')

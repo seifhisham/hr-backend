@@ -10,6 +10,7 @@ import sharp from 'sharp';
 import { z } from 'zod';
 import type { Actor } from '../common/types/actor.type.js';
 import { parse } from '../common/validation/parse.js';
+import { CompanyService } from '../company/company.service.js';
 import { DatabaseService } from '../database/database.service.js';
 
 export const officePolicy = Object.freeze({
@@ -41,17 +42,24 @@ export type Evidence = z.infer<typeof captureSchema> & {
 
 export type AttendanceEvent = 'check-in' | 'check-out';
 
-export function validateLocation(body: unknown) {
+export function validateLocation(
+  body: unknown,
+  policy: {
+    latitude: number;
+    longitude: number;
+    radiusMeters: number;
+  } = officePolicy,
+) {
   const input = parse(captureSchema, body);
   const age = Date.now() - Date.parse(input.capturedAt);
   if (age < -10000 || age > officePolicy.maxCaptureAgeSeconds * 1000)
     throw new BadRequestException(
       'Capture must be recent. Retake the photo and refresh your location.',
     );
-  const distanceMeters = getDistance(input, officePolicy, 0.01);
-  if (distanceMeters > officePolicy.radiusMeters)
+  const distanceMeters = getDistance(input, policy, 0.01);
+  if (distanceMeters > policy.radiusMeters)
     throw new ForbiddenException(
-      'You must be within 50 metres of the office to check in or out.',
+      `You must be within ${policy.radiusMeters} metres of the office to check in or out.`,
     );
   return { ...input, distanceMeters };
 }
@@ -59,11 +67,12 @@ export function validateLocation(body: unknown) {
 @Injectable()
 export class AttendanceEvidence {
   constructor(
+    @Inject(CompanyService) private readonly company: CompanyService,
     @Inject(DatabaseService) private readonly store: DatabaseService,
   ) {}
 
   async prepare(body: unknown, file?: Express.Multer.File): Promise<Evidence> {
-    const location = validateLocation(body);
+    const location = validateLocation(body, this.company.settings());
     if (!file?.buffer?.length)
       throw new BadRequestException('A photo of the place is required.');
     if (file.buffer.length > officePolicy.maxPhotoBytes)
@@ -105,7 +114,8 @@ export class AttendanceEvidence {
     submittedAt: string,
   ) {
     // Called inside the attendance transaction, so no orphan evidence is committed.
-    validateLocation(evidenceFields(evidence));
+    const policy = { ...officePolicy, ...this.company.settings() };
+    const location = validateLocation(evidenceFields(evidence), policy);
     this.store.db
       .prepare(
         'INSERT INTO attendance_evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -116,10 +126,10 @@ export class AttendanceEvidence {
         evidence.latitude,
         evidence.longitude,
         evidence.accuracyMeters,
-        evidence.distanceMeters,
+        location.distanceMeters,
         new Date(evidence.capturedAt).toISOString(),
         submittedAt,
-        JSON.stringify(officePolicy),
+        JSON.stringify(policy),
         evidence.photo,
       );
   }

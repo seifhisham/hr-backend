@@ -1,3 +1,4 @@
+import { CompanyService } from '../src/company/company.service.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -75,6 +76,37 @@ describe('HR REST API', () => {
         ...changes,
       });
 
+  it('uses separate configured departure radius and grace period, preserving running deadlines', async () => {
+    const settings = app.get(CompanyService).settings();
+    await request(server()).patch('/api/settings').set(auth(employeeToken))
+      .send({ ...settings, trackingRadiusMeters: 500, trackingGraceMinutes: 1 }).expect(403);
+    for (const changes of [{ trackingRadiusMeters: 0 }, { trackingGraceMinutes: 0 }, { trackingGraceMinutes: 1.5 }]) {
+      await request(server()).patch('/api/settings').set(auth(adminToken)).send({ ...settings, ...changes }).expect(400);
+    }
+    await request(server()).patch('/api/settings').set(auth(adminToken))
+      .send({ ...settings, trackingRadiusMeters: 500, trackingGraceMinutes: 1 }).expect(200);
+    const policy = (await request(server()).get('/api/attendance/policy').set(auth(employeeToken)).expect(200)).body;
+    expect(policy).toMatchObject({ radiusMeters: 50, tracking: { radiusMeters: 500, graceSeconds: 60 } });
+    const record = (await submit('/api/attendance/check-in', employeeToken).expect(201)).body;
+    // This reading is outside the old 150m boundary but inside the new 500m boundary.
+    expect((await locationUpdate(record.id).expect(201)).body).toMatchObject({ status: 'inside', returnBy: null });
+    vi.setSystemTime(new Date('2026-10-04T07:00:30Z'));
+    await locationUpdate(record.id, { latitude: 30.03 }).expect(201);
+    vi.setSystemTime(new Date('2026-10-04T07:01:00Z'));
+    const warning = (await locationUpdate(record.id, { latitude: 30.03 }).expect(201)).body;
+    expect(warning.returnBy).toBe('2026-10-04T07:02:00.000Z');
+    await request(server()).patch('/api/settings').set(auth(adminToken))
+      .send({ ...settings, trackingRadiusMeters: 500, trackingGraceMinutes: 2 }).expect(200);
+    vi.setSystemTime(new Date('2026-10-04T07:01:30Z'));
+    expect((await locationUpdate(record.id, { latitude: 30.03 }).expect(201)).body.returnBy).toBe(warning.returnBy);
+    app.get(AttendanceLocationService).sweep();
+    expect(app.get(DatabaseService).db.prepare('SELECT check_out FROM attendance WHERE id = ?').get(record.id)?.check_out).toBeNull();
+    vi.setSystemTime(new Date('2026-10-04T07:02:00Z'));
+    await locationUpdate(record.id, { latitude: 30.03 }).expect(201);
+    app.get(AttendanceLocationService).sweep();
+    expect(app.get(DatabaseService).db.prepare('SELECT check_out FROM attendance WHERE id = ?').get(record.id)?.check_out).toBe(warning.returnBy);
+  });
+
   it('confirms departure, persists a five-minute deadline, and checks out once with an audit', async () => {
     const record = (
       await submit('/api/attendance/check-in', employeeToken).expect(201)
@@ -95,6 +127,7 @@ describe('HR REST API', () => {
     expect(started.returnBy).toBe('2026-10-04T07:05:30.000Z');
     // A new provider instance uses the same persisted deadline, not an in-memory timer.
     const processor = new AttendanceLocationService(
+      app.get(CompanyService),
       app.get(DatabaseService),
       app.get(EmployeesService),
       app.get(AuditService),

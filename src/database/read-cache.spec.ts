@@ -108,7 +108,14 @@ it('refreshes company settings and date-specific schedules immediately after upd
   expect(company.settings()).toEqual({
     name: 'After',
     timezone: 'Africa/Cairo',
+    latitude: 30.023092,
+    longitude: 31.528179,
+    radiusMeters: 50,
+    trackingRadiusMeters: 150,
+    trackingGraceMinutes: 5,
   });
+  company.updateSettings(admin, { name: 'After', timezone: 'Africa/Cairo', latitude: 31, longitude: 30, radiusMeters: 200 });
+  expect(company.settings()).toMatchObject({ latitude: 31, longitude: 30, radiusMeters: 200 });
   const input = {
     name: 'Early',
     start: '09:00',

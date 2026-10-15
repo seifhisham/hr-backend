@@ -14,7 +14,7 @@ import type { Actor } from '../common/types/actor.type.js';
 import { parse } from '../common/validation/parse.js';
 import { DatabaseService } from '../database/database.service.js';
 import { EmployeesService } from '../employees/employees.service.js';
-import { officePolicy } from './attendance-evidence.service.js';
+import { CompanyService } from '../company/company.service.js';
 
 export const trackingPolicy = Object.freeze({
   radiusMeters: 150,
@@ -56,10 +56,16 @@ export class AttendanceLocationService
   private timer?: ReturnType<typeof setInterval>;
   private readonly logger = new Logger(AttendanceLocationService.name);
   constructor(
+    @Inject(CompanyService) private readonly company: CompanyService,
     @Inject(DatabaseService) private readonly store: DatabaseService,
     @Inject(EmployeesService) private readonly employees: EmployeesService,
     @Inject(AuditService) private readonly audit: AuditService,
   ) {}
+  policy() {
+    const settings = this.company.settings();
+    return { ...trackingPolicy, radiusMeters: settings.trackingRadiusMeters, graceSeconds: settings.trackingGraceMinutes * 60 };
+  }
+
   onModuleInit() {
     this.timer = setInterval(() => {
       try {
@@ -170,6 +176,7 @@ export class AttendanceLocationService
       this.unavailable(state);
       return;
     }
+    const policy = this.policy();
     const captured = Date.parse(input.capturedAt);
     if (
       captured > now ||
@@ -190,7 +197,7 @@ export class AttendanceLocationService
     )
       this.unavailable(state);
     state.lastCapturedAt = new Date(captured).toISOString();
-    state.distanceMeters = getDistance(input, officePolicy, 0.01);
+    state.distanceMeters = getDistance(input, this.company.settings(), 0.01);
     state.accuracyMeters = input.accuracyMeters;
     if (input.accuracyMeters > trackingPolicy.maxAccuracyMeters) {
       this.unavailable(state);
@@ -198,14 +205,14 @@ export class AttendanceLocationService
     }
     if (
       state.distanceMeters + input.accuracyMeters <=
-      trackingPolicy.radiusMeters
+      policy.radiusMeters
     ) {
       state.status = 'inside';
       state.outsideSince = null;
       state.returnBy = null;
     } else if (
       state.distanceMeters - input.accuracyMeters >
-      trackingPolicy.radiusMeters
+      policy.radiusMeters
     ) {
       state.status = 'outside';
       if (!state.outsideSince) state.outsideSince = new Date(now).toISOString();
@@ -215,7 +222,7 @@ export class AttendanceLocationService
           trackingPolicy.confirmationSeconds * 1000
       )
         state.returnBy = new Date(
-          now + trackingPolicy.graceSeconds * 1000,
+          now + policy.graceSeconds * 1000,
         ).toISOString();
     } else this.unavailable(state);
   }
@@ -249,7 +256,7 @@ export class AttendanceLocationService
             row.id as string,
             { checkOut: null },
             { checkOut, location: this.publicState(state) },
-            'Confirmed outside the 150-metre office boundary after the five-minute return window',
+            'Confirmed outside the configured office boundary after the saved return deadline',
           );
           state.returnBy = null;
         }
