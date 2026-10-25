@@ -6,9 +6,8 @@ import { cpus, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
+import { createLoadDatabase, inLoadCompany } from './postgres-load-fixture.mjs';
 import sharp from 'sharp';
-
 async function server() {
   if (process.env.HR_PERF_SHARP_CONCURRENCY)
     sharp.concurrency(Number(process.env.HR_PERF_SHARP_CONCURRENCY));
@@ -41,20 +40,20 @@ async function server() {
     let writingAttendance = false;
     for (const method of ['checkIn', 'checkOut']) {
       const original = attendance[method].bind(attendance);
-      attendance[method] = (...parameters) => {
+      attendance[method] = async (...parameters) => {
         writingAttendance = true;
         try {
-          return original(...parameters);
+          return await original(...parameters);
         } finally {
           writingAttendance = false;
         }
       };
     }
     const transaction = store.transaction.bind(store);
-    store.transaction = (operation) => {
+    store.transaction = async (operation) => {
       const start = performance.now();
       try {
-        return transaction(operation);
+        return await transaction(operation);
       } finally {
         if (writingAttendance)
           diagnostics?.transaction.push(performance.now() - start);
@@ -96,10 +95,8 @@ async function server() {
     sharpConcurrency: sharp.concurrency(),
   });
 }
-
 async function benchmark() {
   const directory = await mkdtemp(join(tmpdir(), 'hr-attendance-load-'));
-  const databasePath = join(directory, 'hr.sqlite');
   const reportPath = resolve(
     process.argv[2] ?? '../artifacts/attendance-performance.json',
   );
@@ -127,9 +124,10 @@ async function benchmark() {
     employeeCount,
     results,
     methodology:
-      'Separate client/backend processes; compiled NestJS REST API; fresh HTTP connections; no retries; synthetic employees provisioned and authenticated through REST outside timing; valid office GPS and newly captured multipart photo per request; timing includes form creation, upload, photo normalization, SQLite transaction, response download and JSON parsing. Each employee has one fresh check-in and check-out. Duplicate/validation checks and persistence verification are outside timing.',
+      'Separate client/backend processes; compiled NestJS REST API; isolated PostgreSQL; fresh HTTP connections; no retries; synthetic employees provisioned and authenticated through REST outside timing; timing includes upload, photo normalization, PostgreSQL transaction, and response parsing. Validation and persistence checks are outside timing.',
   };
   let child;
+  let fixture;
   async function save() {
     await mkdir(dirname(reportPath), { recursive: true });
     await writeFile(reportPath, JSON.stringify(report, null, 2) + '\n');
@@ -144,13 +142,14 @@ async function benchmark() {
     clearTimeout(timer);
   }
   try {
+    fixture = await createLoadDatabase();
     child = fork(fileURLToPath(import.meta.url), ['--server'], {
       execArgv: [],
       stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
       env: {
         ...process.env,
         NODE_ENV: 'production',
-        HR_DATABASE_PATH: databasePath,
+        ...fixture.env,
         HR_ADMIN_EMAIL: 'load-admin@test.local',
         HR_ADMIN_PASSWORD: password,
         HR_READ_CACHE: 'true',
@@ -415,47 +414,65 @@ async function benchmark() {
     }
     await stop();
     child = undefined;
-    const db = new DatabaseSync(databasePath);
+    const db = fixture.db;
     try {
       assert.equal(
-        db.prepare('SELECT COUNT(*) AS count FROM employees').get().count,
+        (await db.prepare('SELECT COUNT(*) AS count FROM employees').get())
+          .count,
         employeeCount,
       );
       assert.equal(
-        db.prepare('SELECT COUNT(*) AS count FROM attendance').get().count,
+        (await db.prepare('SELECT COUNT(*) AS count FROM attendance').get())
+          .count,
         employeeCount,
       );
       assert.equal(
-        db
-          .prepare(
-            'SELECT COUNT(*) AS count FROM attendance WHERE check_out IS NOT NULL AND check_out >= check_in',
-          )
-          .get().count,
+        (
+          await db
+            .prepare(
+              'SELECT COUNT(*) AS count FROM attendance WHERE check_out IS NOT NULL AND check_out >= check_in',
+            )
+            .get()
+        ).count,
         employeeCount,
       );
       assert.equal(
-        db
-          .prepare(
-            'SELECT COUNT(*) AS count FROM attendance_evidence WHERE length(photo) > 0',
-          )
-          .get().count,
+        (
+          await db
+            .prepare(
+              'SELECT COUNT(*) AS count FROM attendance_evidence WHERE length(photo) > 0',
+            )
+            .get()
+        ).count,
         employeeCount * 2,
       );
       assert.equal(
-        db.prepare('SELECT COUNT(*) AS count FROM attendance_location').get()
-          .count,
+        (
+          await db
+            .prepare('SELECT COUNT(*) AS count FROM attendance_location')
+            .get()
+        ).count,
         0,
       );
       assert.equal(
-        db
-          .prepare(
-            'SELECT COUNT(*) AS count FROM attendance a WHERE (SELECT COUNT(*) FROM attendance_evidence e WHERE e.attendance_id = a.id) != 2',
-          )
-          .get().count,
+        (
+          await db
+            .prepare(
+              'SELECT COUNT(*) AS count FROM attendance a WHERE (SELECT COUNT(*) FROM attendance_evidence e WHERE e.attendance_id = a.id) != 2',
+            )
+            .get()
+        ).count,
         0,
       );
-      assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
-      const stored = db
+      assert.deepEqual(
+        await db
+          .prepare(
+            "SELECT conname FROM pg_constraint WHERE connamespace='public'::regnamespace AND contype='f' AND NOT convalidated",
+          )
+          .all(),
+        [],
+      );
+      const stored = await db
         .prepare('SELECT photo FROM attendance_evidence LIMIT 1')
         .get();
       const metadata = await sharp(stored.photo).metadata();
@@ -480,12 +497,13 @@ async function benchmark() {
         `PASS: ${employeeCount} closed attendance records and ${employeeCount * 2} photo evidence records verified. Results: ${reportPath}`,
       );
     } finally {
-      db.close();
+      await db.close();
     }
   } finally {
     try {
       await stop();
     } finally {
+      await fixture?.close();
       // Delete only the resolved temporary directory created by this test.
       assert.equal(dirname(directory), resolve(tmpdir()));
       assert.ok(
@@ -501,16 +519,15 @@ async function benchmark() {
       report.cleanupVerified = true;
       await save();
       console.log(
-        'Cleanup verified: temporary database, photos, users, sessions, audit and WAL files removed.',
+        'Cleanup verified: disposable PostgreSQL database/role and temporary files removed.',
       );
       process.removeListener('SIGINT', interrupt);
       process.removeListener('SIGTERM', interrupt);
     }
   }
 }
-
 try {
-  if (process.argv[2] === '--server') await server();
+  if (process.argv[2] === '--server') await inLoadCompany(server);
   else await benchmark();
 } catch (error) {
   console.error(error);

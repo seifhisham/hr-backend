@@ -1,3 +1,4 @@
+import { Personal } from '../common/decorators/personal.decorator.js';
 import { RateLimit } from '../common/security/rate-limit.guard.js';
 import {
   Body,
@@ -24,58 +25,99 @@ import {
   targetSchema,
 } from './sales.dto.js';
 import { SalesService } from './sales.service.js';
-
 @Controller('api/sales')
 export class SalesController {
-  constructor(@Inject(SalesService) private readonly sales: SalesService) {}
-  @Get('access') access(@Req() req: AuthRequest) {
-    return this.sales.access(req.actor);
+  constructor(
+    @Inject(SalesService)
+    private readonly sales: SalesService,
+  ) {}
+  @Get('access')
+  @Personal()
+  async access(
+    @Req()
+    req: AuthRequest,
+  ) {
+    return await this.sales.access(req.actor);
   }
   @RateLimit('reports')
   @Get('activities/me')
-  own(@Req() req: AuthRequest, @Query() query: unknown) {
-    return this.sales.list(req.actor, parse(filtersSchema, query), true);
+  @Personal()
+  async own(
+    @Req()
+    req: AuthRequest,
+    @Query()
+    query: unknown,
+  ) {
+    return await this.sales.list(req.actor, parse(filtersSchema, query), true);
   }
   @RateLimit('reports')
   @Get('activities')
-  list(@Req() req: AuthRequest, @Query() query: unknown) {
-    return this.sales.list(req.actor, parse(filtersSchema, query));
+  async list(
+    @Req()
+    req: AuthRequest,
+    @Query()
+    query: unknown,
+  ) {
+    return await this.sales.list(req.actor, parse(filtersSchema, query));
   }
-  @Get('activities/:id') get(@Req() req: AuthRequest, @Param('id') id: string) {
-    return this.sales.get(req.actor, parse(z.uuid(), id));
+  @Get('activities/:id')
+  @Personal()
+  async get(
+    @Req()
+    req: AuthRequest,
+    @Param('id')
+    id: string,
+  ) {
+    return await this.sales.get(req.actor, parse(z.uuid(), id));
   }
-  @Post('activities') create(
-    @Req() req: AuthRequest,
+  @Post('activities')
+  @Personal()
+  async create(
+    @Req()
+    req: AuthRequest,
     @Body(new ZodValidationPipe(createActivitySchema))
     body: z.infer<typeof createActivitySchema>,
   ) {
-    return this.sales.create(req.actor, body.id, body.activity);
+    return await this.sales.create(req.actor, body.id, body.activity);
   }
-  @Patch('activities/:id') update(
-    @Req() req: AuthRequest,
-    @Param('id') id: string,
+  @Patch('activities/:id')
+  @Personal()
+  async update(
+    @Req()
+    req: AuthRequest,
+    @Param('id')
+    id: string,
     @Body(new ZodValidationPipe(updateActivitySchema))
     body: z.infer<typeof updateActivitySchema>,
   ) {
-    return this.sales.update(
+    return await this.sales.update(
       req.actor,
       parse(z.uuid(), id),
       body.expectedRevision,
       body.activity,
     );
   }
-  @Patch('activities/:id/review') review(
-    @Req() req: AuthRequest,
-    @Param('id') id: string,
+  @Patch('activities/:id/review')
+  async review(
+    @Req()
+    req: AuthRequest,
+    @Param('id')
+    id: string,
     @Body(new ZodValidationPipe(reviewSchema))
     body: z.infer<typeof reviewSchema>,
   ) {
-    return this.sales.review(req.actor, parse(z.uuid(), id), body);
+    return await this.sales.review(req.actor, parse(z.uuid(), id), body);
   }
   @RateLimit('reports')
   @Get('performance/me')
-  ownPerformance(@Req() req: AuthRequest, @Query() query: unknown) {
-    return this.sales.performance(
+  @Personal()
+  async ownPerformance(
+    @Req()
+    req: AuthRequest,
+    @Query()
+    query: unknown,
+  ) {
+    return await this.sales.performance(
       req.actor,
       parse(filtersSchema.pick({ month: true }), query),
       true,
@@ -83,31 +125,41 @@ export class SalesController {
   }
   @RateLimit('reports')
   @Get('performance')
-  performance(@Req() req: AuthRequest, @Query() query: unknown) {
-    return this.sales.performance(
+  async performance(
+    @Req()
+    req: AuthRequest,
+    @Query()
+    query: unknown,
+  ) {
+    return await this.sales.performance(
       req.actor,
       parse(filtersSchema.omit({ kind: true, status: true }), query),
     );
   }
-  @Post('targets') target(
-    @Req() req: AuthRequest,
+  @Post('targets')
+  async target(
+    @Req()
+    req: AuthRequest,
     @Body(new ZodValidationPipe(targetSchema))
     body: z.infer<typeof targetSchema>,
   ) {
-    return this.sales.saveTarget(req.actor, body);
+    return await this.sales.saveTarget(req.actor, body);
   }
   @RateLimit('exports')
   @Get('export')
-  export(
-    @Req() req: AuthRequest,
-    @Query() query: unknown,
-    @Res() res: Response,
+  async export(
+    @Req()
+    req: AuthRequest,
+    @Query()
+    query: unknown,
+    @Res({ passthrough: true })
+    res: Response,
   ) {
     const filters = parse(
       filtersSchema.omit({ kind: true, status: true }),
       query,
     );
-    const rows = this.sales.performance(req.actor, filters);
+    const rows = await this.sales.performance(req.actor, filters);
     const cell = (value: string | number | null | undefined) => {
       const text = String(value ?? '');
       const safe = /^\s*[=+\-@]/.test(text) ? `'${text}` : text;
@@ -165,6 +217,6 @@ export class SalesController {
       'Content-Disposition',
       `attachment; filename="sales-performance-${filters.month}.csv"`,
     );
-    res.send(`\uFEFF${csv}`);
+    return `\uFEFF${csv}`;
   }
 }

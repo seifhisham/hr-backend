@@ -5,3 +5,7 @@ data
 .env*
 coverage
 *.log
+.tmp
+.code-review-graph
+logs
+*.tsbuildinfo

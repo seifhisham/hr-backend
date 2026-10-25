@@ -4,18 +4,24 @@ import { ZodValidationPipe } from '../common/validation/zod-validation.pipe.js';
 import { RateLimit } from '../common/security/rate-limit.guard.js';
 import { auditQuerySchema, type AuditQuery } from './audit.dto.js';
 import { AuditService } from './audit.service.js';
-
 @Controller('api/audit')
 export class AuditController {
   constructor(
-    @Inject(AuditService) private readonly auditService: AuditService,
+    @Inject(AuditService)
+    private readonly auditService: AuditService,
   ) {}
   @RateLimit('reports')
   @Get()
-  audit(
-    @Req() req: AuthRequest,
-    @Query(new ZodValidationPipe(auditQuerySchema)) query: AuditQuery,
+  async audit(
+    @Req()
+    req: AuthRequest,
+    @Query(new ZodValidationPipe(auditQuerySchema))
+    query: AuditQuery,
   ) {
-    return this.auditService.auditHistory(req.actor, query.recordId, query);
+    return await this.auditService.auditHistory(
+      req.actor,
+      query.recordId,
+      query,
+    );
   }
 }

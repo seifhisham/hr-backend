@@ -22,45 +22,67 @@ import {
 import type { AuthRequest } from '../auth/types/auth-request.type.js';
 import { parse } from '../common/validation/parse.js';
 import { PayrollService } from './payroll.service.js';
-
 @Controller('api/payroll')
 export class PayrollController {
   constructor(
-    @Inject(PayrollService) private readonly payrollService: PayrollService,
+    @Inject(PayrollService)
+    private readonly payrollService: PayrollService,
   ) {}
-
   @RateLimit('reports')
   @Get()
-  preview(@Req() req: AuthRequest, @Query('month') month: unknown) {
-    return this.payrollService.preview(
+  async preview(
+    @Req()
+    req: AuthRequest,
+    @Query('month')
+    month: unknown,
+  ) {
+    return await this.payrollService.preview(
       req.actor,
       parse(payrollMonthSchema, month),
     );
   }
   @RateLimit('reports')
   @Get('run')
-  run(@Req() req: AuthRequest, @Query('month') month: unknown) {
-    return this.payrollService.run(req.actor, parse(payrollMonthSchema, month));
-  }
-  @Post('approve') approve(
-    @Req() req: AuthRequest,
-    @Body(new ZodValidationPipe(payrollApprovalSchema)) body: ApprovePayrollDto,
+  async run(
+    @Req()
+    req: AuthRequest,
+    @Query('month')
+    month: unknown,
   ) {
-    return this.payrollService.approve(req.actor, body);
+    return await this.payrollService.run(
+      req.actor,
+      parse(payrollMonthSchema, month),
+    );
+  }
+  @Post('approve')
+  async approve(
+    @Req()
+    req: AuthRequest,
+    @Body(new ZodValidationPipe(payrollApprovalSchema))
+    body: ApprovePayrollDto,
+  ) {
+    return await this.payrollService.approve(req.actor, body);
   }
   @RateLimit('reports')
   @Get('deductions')
-  deductions(@Req() req: AuthRequest, @Query() query: unknown) {
-    return this.payrollService.deductions(
+  async deductions(
+    @Req()
+    req: AuthRequest,
+    @Query()
+    query: unknown,
+  ) {
+    return await this.payrollService.deductions(
       req.actor,
       parse(deductionRangeSchema, query),
     );
   }
   @Post('deductions')
-  addDeduction(
-    @Req() req: AuthRequest,
-    @Body(new ZodValidationPipe(deductionSchema)) body: AddDeductionDto,
+  async addDeduction(
+    @Req()
+    req: AuthRequest,
+    @Body(new ZodValidationPipe(deductionSchema))
+    body: AddDeductionDto,
   ) {
-    return this.payrollService.addDeduction(req.actor, body);
+    return await this.payrollService.addDeduction(req.actor, body);
   }
 }

@@ -9,16 +9,23 @@ import { DepartmentsService } from './departments.service.js';
 @Controller('api/departments')
 export class DepartmentsController {
   constructor(
-    @Inject(DepartmentsService) private readonly service: DepartmentsService,
+    @Inject(DepartmentsService)
+    private readonly service: DepartmentsService,
   ) {}
-  @Get() list(@Req() req: AuthRequest) {
-    return this.service.list(req.actor);
+  @Get()
+  async list(
+    @Req()
+    req: AuthRequest,
+  ) {
+    return await this.service.list(req.actor);
   }
-  @Post() create(
-    @Req() req: AuthRequest,
+  @Post()
+  async create(
+    @Req()
+    req: AuthRequest,
     @Body(new ZodValidationPipe(departmentSchema))
     input: CreateDepartmentDto,
   ) {
-    return this.service.create(req.actor, input);
+    return await this.service.create(req.actor, input);
   }
 }

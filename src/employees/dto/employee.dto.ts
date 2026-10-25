@@ -14,6 +14,7 @@ export const employeeSchema = z
     jobTitle: text,
     startDate: dateSchema,
     scheduleId: z.string().uuid(),
+    branchId: z.uuid().optional(),
     scheduleEffectiveFrom: dateSchema.optional(),
     active: z.boolean(),
     salesEnabled: z.boolean().optional(),

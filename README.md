@@ -1,12 +1,12 @@
 # HR Backend
 
-NestJS REST API for the HR dashboard and the later Flutter application. Uses SQLite, Zod request validation, and session authentication. See [API.md](API.md) for endpoint contracts and [the project BRD](../BRD.md) for business requirements.
+NestJS REST API for the HR dashboard and the later Flutter application. Uses PostgreSQL, Zod request validation, and session authentication. See [API.md](API.md) for endpoint contracts and [the project BRD](../docs/requirements/BRD.md) for business requirements.
 
 ## Backend read cache
 
 Company settings, department lists, and schedule definitions (including date-specific versions) use a process-local JSON cache in `DatabaseService`. It holds at most 256 entries for up to 60 seconds and returns independent objects. Set `HR_READ_CACHE=false` and restart the backend to bypass it.
 
-Successful transactions clear the cache before returning. Before each cached read, SQLite's `total_changes()` and `data_version` are checked to detect direct writes on this connection and committed writes from other connections. Reads inside any SQLite transaction bypass the cache entirely, so uncommitted values are never cached. Failed loads are not cached. Invalidation is intentionally broad: unrelated database writes can also clear reference data.
+Cache keys include company identity. Database revision triggers detect committed changes from every connection before cached reads. Reads inside a transaction bypass the cache so uncommitted values are never cached. Failed loads are not cached; invalidation is broad within each company.
 
 Authentication, authorization, employee relationships, schedule assignments, attendance status, notifications, payroll, requests, and sales results remain fresh database reads or calculations. Current dates and workdays are recalculated using the current clock and company timezone. HTTP responses retain their existing `no-store` policy, and clients continue using REST exclusively.
 
@@ -24,7 +24,7 @@ Attendance JSON reports of at least 64 KiB use gzip level 1 when the client pref
 
 Run `npm run test:performance` from `hr-backend`. It builds the backend and measures authenticated employee, attendance (one and three months), payroll preview, sales performance, and schedule reads over HTTP with caching off and on. The client and backend run in separate processes. Each endpoint has 30 measured requests with one reader and another 30 with 10 concurrent readers; response download and JSON parsing are included. Fresh HTTP connections avoid keep-alive reuse affecting comparisons; failed requests are recorded without retries.
 
-The benchmark seeds synthetic workloads of 100 and 500 employees into temporary file-backed databases, using July–September 2026 history, four requests and one payroll deduction per employee, and 20 monthly activities per sales employee (25% of employees). Fixture generation is outside timing. Attendance fixtures are closed intervals without photo uploads; this benchmark measures read APIs, not check-in/photo processing or write contention. Localhost results exclude deployment networking, the frontend proxy, and production hardware.
+The benchmark seeds synthetic workloads of 100 and 500 employees into disposable PostgreSQL databases, using July–September 2026 history, four requests and one payroll deduction per employee, and 20 monthly activities per sales employee (25% of employees). Fixture generation is outside timing. Attendance fixtures are closed intervals without photo uploads; this benchmark measures read APIs, not check-in/photo processing or write contention. Localhost results exclude deployment networking, the frontend proxy, and production hardware.
 
 Results are saved as JSON and CSV in `../artifacts/api-performance.*`, with latency percentiles, throughput, decoded and wire response sizes, row counts, failures, backend CPU, event-loop delay, end-of-phase RSS, query plans, and separately profiled SQL counts. SQL profiling includes already-prepared cache change-counter statements and counts `get/all/run` executions; transaction `exec` calls are not included. Partial JSON results are saved as endpoints finish. Every request validates its response, and the run verifies fixture counts and selected business totals. Existing database files and credentials are never used; only the temporary directory created by this run is removed.
 
@@ -46,7 +46,7 @@ src/
   requests/                     Time-off and forgotten-check-out approval workflows
   audit/                        Audited business changes and activity history
   health/                       Public health endpoint
-  database/                     SQLite connection, schema, transactions, bootstrap
+  database/                     PostgreSQL pool, migrations, scoped transactions, bootstrap
   common/
     decorators/                 Public-route metadata
     security/                   Shared credential and role-check helpers
@@ -64,9 +64,9 @@ Each business feature owns its `*.module.ts`, `*.controller.ts`, `*.service.ts`,
 - Controllers handle HTTP transport and delegate business rules to services. DTO schemas and inferred TypeScript types define request contracts; `ZodValidationPipe` validates JSON bodies before handler execution. Multipart attendance evidence has its own location/image validation.
 - Modules declare explicit imports and export only shared services. Providers are not registered repeatedly, and the module graph does not use circular `forwardRef` dependencies.
 - `AuthGuard` is registered through `APP_GUARD`: routes are protected by default. `@Public()` is reserved for intentional public endpoints. Role and ownership checks remain in services, including cross-feature operations.
-- `DatabaseModule` owns the single SQLite connection and synchronous transaction helper. Bootstrap creates initial settings, schedules, and the administrator only when missing. The existing schema, database path, credentials, and REST contracts are unchanged.
-- Services currently execute prepared SQLite statements directly. An ORM or generic repository layer is not required for this small system. Do not duplicate the connection or introduce another persistence implementation without a separate migration plan.
-- Request approval calls the attendance service's transaction-aware correction method inside the same transaction. Request decision, correction, and audit must commit or roll back together. Do not nest separate `DatabaseService.transaction()` calls.
+- `DatabaseModule` owns the PostgreSQL pool and awaited transaction helper. Bootstrap initializes missing settings/schedules/admin only for an explicitly selected active company. Follow [POSTGRES.md](POSTGRES.md); no automatic SQLite import or company creation occurs.
+- Services execute parameterized PostgreSQL queries through the scoped database service. An ORM or generic repository layer is not required for this small system. Do not duplicate the connection or introduce another persistence implementation without a separate migration plan.
+- Request approval calls the attendance service's transaction-aware correction method inside the same transaction. Request decision, correction, and audit must commit or roll back together. Nested `DatabaseService.transaction()` calls reuse the active scoped client.
 - Attendance reports read an approved-request projection from the shared database, avoiding a runtime circular dependency between attendance and requests. Cross-feature writes go through the responsible service.
 - Keep feature-specific DTOs and types local. Add to `common/` only when multiple features genuinely share the contract or behavior. Preserve `.js` import extensions for the project's Node ESM configuration.
 - The dashboard and Flutter app consume the REST API only; neither may import backend services or access database files.
@@ -83,7 +83,7 @@ Copy-Item .env.example .env
 npm run start:dev
 ```
 
-Set `HR_ADMIN_EMAIL` and a unique `HR_ADMIN_PASSWORD` in `.env` before the first start. Do not overwrite an existing `.env`. Default API address: `http://127.0.0.1:3002/api`; default database: `data/hr.sqlite`. Existing administrators are not overwritten by bootstrap environment values.
+Do not put account emails or passwords in `.env`. Create the first platform owner with the [terminal setup](OWNER.md#initial-owner-setup); company administrators use owner-generated invitations. Keep existing accounts in PostgreSQL. Default API address: `http://127.0.0.1:3002/api`; HR_PG_URL must explicitly select the restricted PostgreSQL runtime database. Set up migrations using [POSTGRES.md](POSTGRES.md) before startup. Starting the backend does not create an account.
 
 If port 3002 is already serving this backend, use that running instance instead of starting a second copy. Environment variables and deployment requirements are described in [the workspace README](../README.md).
 
@@ -106,7 +106,7 @@ npm run test:load
 
 Builds the backend and runs an isolated loopback HTTP server on an automatically assigned port in a separate process from the client. Provisions 160 test employees through REST, then measures fresh check-ins and check-outs with one client (30 employees), 10 concurrent clients (30 employees), and a 100-client burst (100 employees). Each request uploads a generated 1600x1200 JPEG with valid office coordinates. Caching is enabled, HTTP connections are fresh, and requests are not retried. Provisioning and login are outside attendance timings. Results include success/failure counts, requests per second, median, p95, and maximum response times, saved to `../artifacts/attendance-performance.json`.
 
-All test records, credentials, sessions, audit entries, and photos live in a newly created OS temporary directory, not the company database or Docker volume. The server closes and that entire directory (including SQLite WAL files) is removed and its absence verified on success or failure. SIGINT/SIGTERM trigger cleanup where the host delivers those signals. Forced process termination, power loss, or an OS crash cannot guarantee cleanup; any leftover directory is prefixed `hr-attendance-load-` under the OS temporary folder.
+All test records, credentials, sessions, audit entries, and photos live in a newly created OS temporary directory, not the company database or Docker volume. The server closes and that entire directory (including temporary files) is removed and its absence verified on success or failure. SIGINT/SIGTERM trigger cleanup where the host delivers those signals. Forced process termination, power loss, or an OS crash cannot guarantee cleanup; any leftover directory is prefixed `hr-attendance-load-` under the OS temporary folder.
 
 The test also checks missing photos, out-of-office GPS, unauthenticated requests, another employee attempting checkout, duplicate submissions, and immediate reads after writes. It verifies one closed attendance record and two non-empty photo-evidence records per employee, removal of location tracking after checkout, foreign keys, and normalization of one stored image. Any unexpected response or incorrect persistence makes the command fail. Partial results are saved with `complete: false` if the run stops early.
 

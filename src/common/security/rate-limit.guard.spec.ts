@@ -2,7 +2,11 @@ import { type ExecutionContext, HttpException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { RateLimit, RateLimitGuard, RATE_LIMITS } from './rate-limit.guard.js';
 
-function context(bucket: keyof typeof RATE_LIMITS, id = 'account-one') {
+function context(
+  bucket: keyof typeof RATE_LIMITS,
+  id = 'account-one',
+  companyId = 'company-one',
+) {
   class Route {
     @RateLimit(bucket)
     handler(this: void) {}
@@ -13,7 +17,7 @@ function context(bucket: keyof typeof RATE_LIMITS, id = 'account-one') {
     execution: {
       getHandler: () => Route.prototype.handler,
       switchToHttp: () => ({
-        getRequest: () => ({ actor: { id } }),
+        getRequest: () => ({ actor: { id, companyId } }),
         getResponse: () => ({
           setHeader: (key: string, value: string) => headers.set(key, value),
         }),
@@ -65,4 +69,17 @@ it('does not require an actor or consume budget for unmarked routes', () => {
     },
   } as unknown as ExecutionContext;
   expect(guard.canActivate(execution)).toBe(true);
+});
+
+it('isolates identical account IDs belonging to different companies', () => {
+  const guard = new RateLimitGuard(new Reflector());
+  const route = context('exports', 'same-account', 'company-one');
+  for (let index = 0; index < RATE_LIMITS.exports.requests; index++)
+    guard.canActivate(route.execution);
+  expect(() => guard.canActivate(route.execution)).toThrow(HttpException);
+  expect(
+    guard.canActivate(
+      context('exports', 'same-account', 'company-two').execution,
+    ),
+  ).toBe(true);
 });

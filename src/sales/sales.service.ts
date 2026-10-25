@@ -23,56 +23,98 @@ import type {
   reviewSchema,
   targetSchema,
 } from './sales.dto.js';
-
 @Injectable()
 export class SalesService {
   constructor(
-    @Inject(DatabaseService) private readonly store: DatabaseService,
-    @Inject(AuditService) private readonly audit: AuditService,
-    @Inject(CompanyService) private readonly company: CompanyService,
-    @Inject(EmployeesService) private readonly employees: EmployeesService,
+    @Inject(DatabaseService)
+    private readonly store: DatabaseService,
+    @Inject(AuditService)
+    private readonly audit: AuditService,
+    @Inject(CompanyService)
+    private readonly company: CompanyService,
+    @Inject(EmployeesService)
+    private readonly employees: EmployeesService,
   ) {}
   private get db() {
     return this.store.db;
   }
-  private managedEmployees(actor: Actor): string[] {
+  private async managedEmployees(actor: Actor): Promise<string[]> {
     return actor.role === 'manager'
-      ? this.employees.managedEmployees(actor).map((employee) => employee.id)
+      ? (await this.employees.managedEmployees(actor)).map(
+          (employee) => employee.id,
+        )
       : [];
   }
-  access(actor: Actor) {
-    const employee = this.employees.profile(actor);
+  async access(actor: Actor) {
+    const employee = await this.employees.profile(actor);
+    const granted =
+      actor.role !== 'hr' ||
+      !!(await this.db
+        .prepare('SELECT 1 FROM hr_branch_grants WHERE user_id=? LIMIT 1')
+        .get(actor.id));
     return {
       canSubmit: !!employee?.active && !!employee.salesEnabled,
-      canReview: actor.role !== 'employee',
-      canSetTargets: actor.role === 'hr' || actor.role === 'admin',
+      canReview: actor.role !== 'employee' && granted,
+      canSetTargets: (actor.role === 'hr' && granted) || actor.role === 'admin',
     };
   }
-  private scope(actor: Actor, own: boolean): Employee[] {
+  private async scope(
+    actor: Actor,
+    own: boolean,
+    month?: string,
+  ): Promise<Employee[]> {
     if (own)
-      return actor.employeeId ? [this.employees.employeeActor(actor)] : [];
+      return actor.employeeId
+        ? [await this.employees.employeeActor(actor)]
+        : [];
     if (actor.role === 'employee')
       throw new ForbiddenException('Sales review access required');
+    if (actor.role === 'hr' && month)
+      return (
+        await this.employees.historicalScope(
+          actor,
+          month + '-01',
+          month + '-31',
+        )
+      ).employees;
     return actor.role === 'manager'
-      ? this.employees.managedEmployees(actor)
-      : this.employees.employees(actor);
+      ? await this.employees.managedEmployees(actor)
+      : await this.employees.employees(actor);
   }
-  private canReview(actor: Actor, employee: Employee) {
+  private async canReview(actor: Actor, employee: Employee, date?: string) {
+    if (
+      actor.role === 'hr' &&
+      !(await this.db
+        .prepare(
+          'SELECT 1 FROM hr_branch_grants WHERE user_id=? AND branch_id=hr_branch_at(?,?)',
+        )
+        .get(
+          actor.id,
+          employee.id,
+          date ??
+            localTime(new Date(), (await this.company.settings()).timezone)
+              .date,
+        ))
+    )
+      return false;
     return (
       employee.id !== actor.employeeId &&
       (actor.role === 'hr' ||
         actor.role === 'admin' ||
-        this.managedEmployees(actor).includes(employee.id))
+        (await this.managedEmployees(actor)).includes(employee.id))
     );
   }
-  private submitter(actor: Actor) {
-    const employee = this.employees.employeeActor(actor);
+  private async submitter(actor: Actor) {
+    const employee = await this.employees.employeeActor(actor);
     if (!employee.active || !employee.salesEnabled)
       throw new ForbiddenException('Sales activity access is not enabled');
     return employee;
   }
-  private validateDate(employee: Employee, activity: ActivityInput) {
-    const today = localTime(new Date(), this.company.settings().timezone).date;
+  private async validateDate(employee: Employee, activity: ActivityInput) {
+    const today = localTime(
+      new Date(),
+      (await this.company.settings()).timezone,
+    ).date;
     if (
       activity.activityDate < employee.startDate ||
       activity.activityDate > today
@@ -81,36 +123,44 @@ export class SalesService {
         'Activity date must be between employment start and today in company time',
       );
   }
-  private find(id: string): SalesActivity {
-    const row = this.db
+  private async find(id: string): Promise<SalesActivity> {
+    const row = await this.db
       .prepare('SELECT data FROM sales_activities WHERE id = ?')
       .get(id);
     if (!row) throw new NotFoundException('Sales activity not found');
     return JSON.parse(row.data as string) as SalesActivity;
   }
-  private present(actor: Actor, activity: SalesActivity) {
-    const employee = this.employees.employee(activity.employeeId);
+  private async present(actor: Actor, activity: SalesActivity) {
+    const employee = await this.employees.historicalEmployee(
+      actor,
+      activity.employeeId,
+      activity.activityDate,
+    );
     return {
       ...activity,
       employeeName: employee.name,
       employeeNumber: employee.employeeNumber,
       department: employee.department,
-      canReview: this.canReview(actor, employee),
+      canReview: await this.canReview(actor, employee, activity.activityDate),
     };
   }
-  get(actor: Actor, id: string) {
-    const activity = this.find(id);
-    const employee = this.employees.employee(activity.employeeId);
+  async get(actor: Actor, id: string) {
+    const activity = await this.find(id);
+    const employee = await this.employees.historicalEmployee(
+      actor,
+      activity.employeeId,
+      activity.activityDate,
+    );
     if (
       activity.employeeId !== actor.employeeId &&
-      !this.canReview(actor, employee)
+      !(await this.canReview(actor, employee, activity.activityDate))
     )
       throw new NotFoundException('Sales activity not found');
-    return this.present(actor, activity);
+    return await this.present(actor, activity);
   }
-  list(actor: Actor, filters: SalesFilters, own = false) {
+  async list(actor: Actor, filters: SalesFilters, own = false) {
     const allowed = new Map(
-      this.scope(actor, own)
+      (await this.scope(actor, own, filters.month))
         .filter(
           (employee) =>
             (!filters.employeeId || employee.id === filters.employeeId) &&
@@ -118,7 +168,7 @@ export class SalesService {
         )
         .map((employee) => [employee.id, employee]),
     );
-    return this.activities(filters.month, [...allowed.keys()])
+    return (await this.activities(filters.month, [...allowed.keys()]))
       .filter(
         (activity) =>
           (!filters.kind || activity.kind === filters.kind) &&
@@ -136,21 +186,25 @@ export class SalesService {
         };
       });
   }
-  private activities(month: string, employeeIds: string[]): SalesActivity[] {
+  private async activities(
+    month: string,
+    employeeIds: string[],
+  ): Promise<SalesActivity[]> {
     if (!employeeIds.length) return [];
-    return this.db
-      .prepare(
-        "SELECT data FROM sales_activities WHERE activity_date >= ? AND activity_date < date(?, '+1 month') AND employee_id IN (SELECT value FROM json_each(?)) ORDER BY activity_date DESC, rowid DESC",
-      )
-      .all(`${month}-01`, `${month}-01`, JSON.stringify(employeeIds))
-      .map((row) => JSON.parse(row.data as string) as SalesActivity);
-  }
-  private write(activity: SalesActivity) {
-    try {
-      this.db
+    return (
+      await this.db
         .prepare(
-          `INSERT INTO sales_activities VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET activity_date = excluded.activity_date, deal_reference = excluded.deal_reference, data = excluded.data`,
+          "SELECT data FROM sales_activities WHERE activity_date >= ? AND activity_date < to_char((?::date + interval '1 month'),'YYYY-MM-DD') AND employee_id IN (SELECT value FROM jsonb_array_elements_text(?::jsonb)) ORDER BY activity_date DESC, row_order DESC",
+        )
+        .all(`${month}-01`, `${month}-01`, JSON.stringify(employeeIds))
+    ).map((row) => JSON.parse(row.data as string) as SalesActivity);
+  }
+  private async write(activity: SalesActivity) {
+    try {
+      await this.db
+        .prepare(
+          `INSERT INTO sales_activities (id,employee_id,activity_date,deal_reference,data) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(company_id,id) DO UPDATE SET activity_date = excluded.activity_date, deal_reference = excluded.deal_reference, data = excluded.data`,
         )
         .run(
           activity.id,
@@ -160,18 +214,22 @@ export class SalesService {
           JSON.stringify(activity),
         );
     } catch (error) {
-      if (error instanceof Error && error.message.includes('UNIQUE constraint'))
+      if (error instanceof Error && 'code' in error && error.code === '23505')
         throw new ConflictException(
           'This deal reference is already registered',
+        );
+      if (error instanceof Error && 'code' in error && error.code === '23514')
+        throw new BadRequestException(
+          'Activity dates cannot cross a branch transfer',
         );
       throw error;
     }
   }
-  create(actor: Actor, id: string, input: ActivityInput) {
-    const employee = this.submitter(actor);
-    this.validateDate(employee, input);
-    return this.store.transaction(() => {
-      const existing = this.db
+  async create(actor: Actor, id: string, input: ActivityInput) {
+    const employee = await this.submitter(actor);
+    await this.validateDate(employee, input);
+    return await this.store.transaction(async () => {
+      const existing = await this.db
         .prepare('SELECT data FROM sales_activities WHERE id = ?')
         .get(id);
       if (existing) {
@@ -193,7 +251,7 @@ export class SalesService {
           throw new ConflictException(
             'Submission ID was already used for different activity data',
           );
-        return this.present(actor, activity);
+        return await this.present(actor, activity);
       }
       const now = new Date().toISOString();
       const activity: SalesActivity = {
@@ -206,16 +264,27 @@ export class SalesService {
         status: 'pending',
         review: null,
       };
-      this.write(activity);
-      this.audit.record(actor, 'sales.activity.created', id, null, activity);
-      return this.present(actor, activity);
+      await this.write(activity);
+      await this.audit.record(
+        actor,
+        'sales.activity.created',
+        id,
+        null,
+        activity,
+      );
+      return await this.present(actor, activity);
     });
   }
-  update(actor: Actor, id: string, revision: number, input: ActivityInput) {
-    const employee = this.submitter(actor);
-    this.validateDate(employee, input);
-    return this.store.transaction(() => {
-      const before = this.find(id);
+  async update(
+    actor: Actor,
+    id: string,
+    revision: number,
+    input: ActivityInput,
+  ) {
+    const employee = await this.submitter(actor);
+    await this.validateDate(employee, input);
+    return await this.store.transaction(async () => {
+      const before = await this.find(id);
       if (before.employeeId !== employee.id)
         throw new NotFoundException('Sales activity not found');
       if (before.revision !== revision || before.status === 'verified')
@@ -232,15 +301,31 @@ export class SalesService {
         status: 'pending',
         review: before.review,
       };
-      this.write(after);
-      this.audit.record(actor, 'sales.activity.updated', id, before, after);
-      return this.present(actor, after);
+      await this.write(after);
+      await this.audit.record(
+        actor,
+        'sales.activity.updated',
+        id,
+        before,
+        after,
+      );
+      return await this.present(actor, after);
     });
   }
-  review(actor: Actor, id: string, input: z.infer<typeof reviewSchema>) {
-    return this.store.transaction(() => {
-      const before = this.find(id);
-      if (!this.canReview(actor, this.employees.employee(before.employeeId)))
+  async review(actor: Actor, id: string, input: z.infer<typeof reviewSchema>) {
+    return await this.store.transaction(async () => {
+      const before = await this.find(id);
+      if (
+        !(await this.canReview(
+          actor,
+          await this.employees.historicalEmployee(
+            actor,
+            before.employeeId,
+            before.activityDate,
+          ),
+          before.activityDate,
+        ))
+      )
         throw new ForbiddenException(
           'Only HR or the assigned direct manager can review another employee’s activity',
         );
@@ -267,8 +352,8 @@ export class SalesService {
           at: now,
         },
       };
-      this.write(after);
-      this.audit.record(
+      await this.write(after);
+      await this.audit.record(
         actor,
         `sales.activity.${input.status}`,
         id,
@@ -276,26 +361,43 @@ export class SalesService {
         after,
         input.reason,
       );
-      return this.present(actor, after);
+      return await this.present(actor, after);
     });
   }
-  private target(employeeId: string, month: string): SalesTarget | null {
-    const row = this.db
+  private async target(
+    employeeId: string,
+    month: string,
+  ): Promise<SalesTarget | null> {
+    const row = await this.db
       .prepare(
         'SELECT data FROM sales_targets WHERE employee_id = ? AND month = ?',
       )
       .get(employeeId, month);
     return row ? (JSON.parse(row.data as string) as SalesTarget) : null;
   }
-  saveTarget(actor: Actor, input: z.infer<typeof targetSchema>) {
+  async saveTarget(actor: Actor, input: z.infer<typeof targetSchema>) {
     requireHr(actor);
-    const employee = this.employees.employee(input.employeeId);
+    if (
+      !(
+        await this.db
+          .prepare('SELECT hr_month_visible(?,?) AS allowed')
+          .get(input.employeeId, input.month)
+      )?.allowed
+    )
+      throw new BadRequestException(
+        'Targets span branches outside your access',
+      );
+    const employee = await this.employees.historicalEmployee(
+      actor,
+      input.employeeId,
+      input.month + '-01',
+    );
     if (!employee.active || !employee.salesEnabled)
       throw new BadRequestException('Select an active sales-enabled employee');
     if (input.month < employee.startDate.slice(0, 7))
       throw new BadRequestException('Target month precedes employment');
-    return this.store.transaction(() => {
-      const before = this.target(employee.id, input.month);
+    return await this.store.transaction(async () => {
+      const before = await this.target(employee.id, input.month);
       if ((before?.revision ?? 0) !== input.expectedRevision)
         throw new ConflictException('Targets changed. Refresh before saving.');
       const { expectedRevision: _revision, ...fields } = input;
@@ -305,12 +407,12 @@ export class SalesService {
         updatedAt: new Date().toISOString(),
         updatedBy: actor.name,
       };
-      this.db
+      await this.db
         .prepare(
-          'INSERT INTO sales_targets VALUES (?, ?, ?) ON CONFLICT(employee_id, month) DO UPDATE SET data = excluded.data',
+          'INSERT INTO sales_targets (employee_id,month,data) VALUES (?, ?, ?) ON CONFLICT(company_id,employee_id, month) DO UPDATE SET data = excluded.data',
         )
         .run(employee.id, input.month, JSON.stringify(after));
-      this.audit.record(
+      await this.audit.record(
         actor,
         'sales.target.saved',
         employee.id,
@@ -321,12 +423,12 @@ export class SalesService {
       return after;
     });
   }
-  performance(
+  async performance(
     actor: Actor,
     filters: Pick<SalesFilters, 'month' | 'department' | 'employeeId'>,
     own = false,
   ) {
-    const employees = this.scope(actor, own).filter(
+    const employees = (await this.scope(actor, own, filters.month)).filter(
       (employee) =>
         employee.startDate.slice(0, 7) <= filters.month &&
         (!filters.department || employee.department === filters.department) &&
@@ -334,21 +436,22 @@ export class SalesService {
     );
     const employeeIds = employees.map((employee) => employee.id);
     const byEmployee = new Map<string, SalesActivity[]>();
-    for (const activity of this.activities(filters.month, employeeIds)) {
+    for (const activity of await this.activities(filters.month, employeeIds)) {
       const entries = byEmployee.get(activity.employeeId) ?? [];
       entries.push(activity);
       byEmployee.set(activity.employeeId, entries);
     }
     const targets = new Map(
-      this.db
-        .prepare(
-          'SELECT employee_id, data FROM sales_targets WHERE month = ? AND employee_id IN (SELECT value FROM json_each(?))',
-        )
-        .all(filters.month, JSON.stringify(employeeIds))
-        .map((row) => [
-          row.employee_id as string,
-          JSON.parse(row.data as string) as SalesTarget,
-        ]),
+      (
+        await this.db
+          .prepare(
+            'SELECT employee_id, data FROM sales_targets WHERE month = ? AND employee_id IN (SELECT value FROM jsonb_array_elements_text(?::jsonb))',
+          )
+          .all(filters.month, JSON.stringify(employeeIds))
+      ).map((row) => [
+        row.employee_id as string,
+        JSON.parse(row.data as string) as SalesTarget,
+      ]),
     );
     return employees.flatMap((employee) => {
       const entries = byEmployee.get(employee.id) ?? [];

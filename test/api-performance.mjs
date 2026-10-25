@@ -6,7 +6,7 @@ import { cpus, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance, monitorEventLoopDelay } from 'node:perf_hooks';
-
+import { createLoadDatabase, inLoadCompany } from './postgres-load-fixture.mjs';
 const script = fileURLToPath(import.meta.url);
 const endpoints = [
   ['Employees', '/employees'],
@@ -16,7 +16,6 @@ const endpoints = [
   ['Sales performance', '/sales/performance?month=2026-09'],
   ['Schedules', '/schedules'],
 ];
-
 async function server() {
   const { NestFactory } = await import('@nestjs/core');
   const { AppModule } = await import('../dist/app.module.js');
@@ -31,10 +30,9 @@ async function server() {
   const store = app.get(DatabaseService);
   const db = store.db;
   const count = Number(process.env.HR_PERF_EMPLOYEES);
-  const schedules = db
-    .prepare('SELECT data FROM schedules ORDER BY rowid')
-    .all()
-    .map((row) => JSON.parse(row.data));
+  const schedules = (
+    await db.prepare('SELECT data FROM schedules ORDER BY row_order').all()
+  ).map((row) => JSON.parse(row.data));
   const employeeIds = Array.from({ length: count }, () => randomUUID());
   const days = [];
   for (
@@ -44,27 +42,27 @@ async function server() {
   )
     if (date.getUTCDay() < 5) days.push(date.toISOString().slice(0, 10));
   const employeeInsert = db.prepare(
-    'INSERT INTO employees VALUES (?, ?, ?, ?)',
+    'INSERT INTO employees (id,code,email,data) VALUES (?, ?, ?, ?)',
   );
   const assignmentInsert = db.prepare(
-    'INSERT INTO employee_schedules VALUES (?, ?, ?)',
+    'INSERT INTO employee_schedules (employee_id,effective_from,schedule_id) VALUES (?, ?, ?)',
   );
   const attendanceInsert = db.prepare(
-    'INSERT INTO attendance VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO attendance (id,employee_id,work_date,check_in,check_out,schedule,timezone) VALUES (?, ?, ?, ?, ?, ?, ?)',
   );
   const requestInsert = db.prepare(
-    'INSERT INTO employee_requests VALUES (?, ?, ?, ?)',
+    'INSERT INTO employee_requests (id,employee_id,status,data) VALUES (?, ?, ?, ?)',
   );
   const salesInsert = db.prepare(
-    'INSERT INTO sales_activities VALUES (?, ?, ?, ?, ?)',
+    'INSERT INTO sales_activities (id,employee_id,activity_date,deal_reference,data) VALUES (?, ?, ?, ?, ?)',
   );
   const deductionInsert = db.prepare(
-    'INSERT INTO payroll_deductions VALUES (?, ?, ?, ?)',
+    'INSERT INTO payroll_deductions (id,employee_id,month,data) VALUES (?, ?, ?, ?)',
   );
-  const admin = db
+  const admin = await db
     .prepare("SELECT id, name FROM users WHERE role = 'admin'")
     .get();
-  store.transaction(() => {
+  await store.transaction(async () => {
     for (let index = 0; index < count; index++) {
       const id = employeeIds[index];
       const salesEnabled = index % 4 === 0;
@@ -90,21 +88,23 @@ async function server() {
         monthlySalary: 12000 + (index % 10) * 1000,
         salaryCurrency: 'EGP',
       };
-      employeeInsert.run(
+      await employeeInsert.run(
         id,
         employee.nationalId,
         employee.email,
         JSON.stringify(employee),
       );
-      db.prepare('INSERT OR IGNORE INTO departments VALUES (?)').run(
-        department,
-      );
-      assignmentInsert.run(id, '2026-01-01', schedule.id);
+      await db
+        .prepare(
+          'INSERT INTO departments (name) VALUES (?) ON CONFLICT DO NOTHING',
+        )
+        .run(department);
+      await assignmentInsert.run(id, '2026-01-01', schedule.id);
       const leaveDay = '2026-09-15';
       for (const day of days) {
         if (day === leaveDay) continue;
         const hour = salesEnabled ? '08' : '07';
-        attendanceInsert.run(
+        await attendanceInsert.run(
           randomUUID(),
           id,
           day,
@@ -138,7 +138,12 @@ async function server() {
           attendance: null,
           managerReview: null,
         };
-        requestInsert.run(request.id, id, status, JSON.stringify(request));
+        await requestInsert.run(
+          request.id,
+          id,
+          status,
+          JSON.stringify(request),
+        );
       }
       const deduction = {
         id: randomUUID(),
@@ -150,7 +155,7 @@ async function server() {
         recordedBy: admin.name,
         recordedById: admin.id,
       };
-      deductionInsert.run(
+      await deductionInsert.run(
         deduction.id,
         id,
         deduction.month,
@@ -203,7 +208,7 @@ async function server() {
                   followUpDate: null,
                 }),
           };
-          salesInsert.run(
+          await salesInsert.run(
             activity.id,
             id,
             activity.activityDate,
@@ -211,69 +216,84 @@ async function server() {
             JSON.stringify(activity),
           );
         }
-        db.prepare('INSERT INTO sales_targets VALUES (?, ?, ?)').run(
-          id,
-          month,
-          JSON.stringify({
-            employeeId: id,
+        await db
+          .prepare(
+            'INSERT INTO sales_targets (employee_id,month,data) VALUES (?, ?, ?)',
+          )
+          .run(
+            id,
             month,
-            meetings: 20,
-            deals: 5,
-            transactionValue: 5000000,
-            currency: 'EGP',
-            reason: 'Fixture target',
-            revision: 1,
-            updatedAt: `${month}-01T07:00:00.000Z`,
-            updatedBy: admin.name,
-          }),
-        );
+            JSON.stringify({
+              employeeId: id,
+              month,
+              meetings: 20,
+              deals: 5,
+              transactionValue: 5000000,
+              currency: 'EGP',
+              reason: 'Fixture target',
+              revision: 1,
+              updatedAt: `${month}-01T07:00:00.000Z`,
+              updatedBy: admin.name,
+            }),
+          );
       }
     }
   });
-  db.prepare(
-    "INSERT INTO settings (key, value) VALUES ('employee_number_sequence', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-  ).run(String(count));
+  await db
+    .prepare(
+      "INSERT INTO settings (key, value) VALUES ('employee_number_sequence', ?) ON CONFLICT(company_id,key) DO UPDATE SET value = excluded.value",
+    )
+    .run(String(count));
   const counts = Object.fromEntries(
-    [
-      'employees',
-      'attendance',
-      'employee_requests',
-      'sales_activities',
-      'payroll_deductions',
-    ].map((table) => [
-      table,
-      Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count),
-    ]),
+    await Promise.all(
+      [
+        'employees',
+        'attendance',
+        'employee_requests',
+        'sales_activities',
+        'payroll_deductions',
+      ].map(async (table) => [
+        table,
+        Number(
+          (await db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get())
+            .count,
+        ),
+      ]),
+    ),
   );
   assert.equal(counts.employees, count);
   assert.equal(counts.employee_requests, count * 4);
   assert.equal(counts.attendance, count * (days.length - 1));
   let profile;
-  const statementPrototype = Object.getPrototypeOf(db.prepare('SELECT 1'));
-  const methods = ['get', 'all', 'run'];
-  const originalMethods = new Map(
-    methods.map((method) => [method, statementPrototype[method]]),
-  );
+  const originalPrepare = db.prepare.bind(db);
+  db.prepare = (sql) => {
+    const statement = originalPrepare(sql);
+    for (const method of ['get', 'all', 'run']) {
+      const original = statement[method];
+      statement[method] = async (...parameters) => {
+        const current = profile;
+        const start = performance.now();
+        try {
+          return await original(...parameters);
+        } finally {
+          if (current) {
+            current.statements++;
+            current.sqlMs += performance.now() - start;
+          }
+        }
+      };
+    }
+    return statement;
+  };
   const loopDelay = monitorEventLoopDelay({ resolution: 10 });
   let cpuStart;
   process.on('message', async (message) => {
     if (message === 'profile-start') {
       profile = { statements: 0, sqlMs: 0 };
-      for (const method of methods)
-        statementPrototype[method] = function (...parameters) {
-          const start = performance.now();
-          try {
-            return originalMethods.get(method).apply(this, parameters);
-          } finally {
-            profile.statements++;
-            profile.sqlMs += performance.now() - start;
-          }
-        };
       process.send({ type: 'profile-ready' });
     } else if (message === 'profile-stop') {
-      for (const method of methods)
-        statementPrototype[method] = originalMethods.get(method);
       process.send({ type: 'profile', ...profile });
+      profile = undefined;
     } else if (message === 'metrics-start') {
       loopDelay.reset();
       loopDelay.enable();
@@ -296,22 +316,23 @@ async function server() {
   });
   await app.listen(0, '127.0.0.1');
   const queryPlans = {
-    attendance: db
-      .prepare(
-        'EXPLAIN QUERY PLAN SELECT * FROM attendance WHERE employee_id IN (SELECT value FROM json_each(?)) AND work_date >= ? AND work_date <= ?',
-      )
-      .all(JSON.stringify(employeeIds), '2026-07-01', '2026-09-30')
-      .map((row) => row.detail),
-    sales: db
-      .prepare(
-        "EXPLAIN QUERY PLAN SELECT data FROM sales_activities WHERE activity_date >= ? AND activity_date < date(?, '+1 month') AND employee_id IN (SELECT value FROM json_each(?)) ORDER BY activity_date DESC, rowid DESC",
-      )
-      .all('2026-09-01', '2026-09-01', JSON.stringify(employeeIds))
-      .map((row) => row.detail),
+    attendance: (
+      await db
+        .prepare(
+          'EXPLAIN SELECT * FROM attendance WHERE employee_id IN (SELECT value FROM jsonb_array_elements_text(?::jsonb)) AND work_date >= ? AND work_date <= ?',
+        )
+        .all(JSON.stringify(employeeIds), '2026-07-01', '2026-09-30')
+    ).map((row) => row['QUERY PLAN']),
+    sales: (
+      await db
+        .prepare(
+          "EXPLAIN SELECT data FROM sales_activities WHERE activity_date >= ? AND activity_date < to_char((?::date + interval '1 month'),'YYYY-MM-DD') AND employee_id IN (SELECT value FROM jsonb_array_elements_text(?::jsonb)) ORDER BY activity_date DESC, row_order DESC",
+        )
+        .all('2026-09-01', '2026-09-01', JSON.stringify(employeeIds))
+    ).map((row) => row['QUERY PLAN']),
   };
   process.send({ type: 'ready', base: await app.getUrl(), counts, queryPlans });
 }
-
 function message(child, type) {
   return new Promise((fulfill, reject) => {
     const timer = setTimeout(
@@ -337,7 +358,6 @@ function message(child, type) {
     child.once('error', onError);
   });
 }
-
 async function benchmark() {
   const reportPath = resolve(
     process.argv[2] ?? '../artifacts/api-performance.json',
@@ -350,6 +370,7 @@ async function benchmark() {
   const queryPlans = {};
   const keepAlive = process.env.HR_PERF_KEEP_ALIVE === 'true';
   let child;
+  let fixture;
   async function stop() {
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
     const current = child;
@@ -370,13 +391,14 @@ async function benchmark() {
   try {
     for (const employees of [100, 500]) {
       for (const cache of [false, true]) {
+        fixture = await createLoadDatabase();
         child = fork(script, ['--server'], {
           cwd: resolve(dirname(script), '..'),
           stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
           env: {
             ...process.env,
             NODE_ENV: 'production',
-            HR_DATABASE_PATH: join(directory, `${employees}-${cache}.sqlite`),
+            ...fixture.env,
             HR_ADMIN_EMAIL: 'performance-admin@test.local',
             HR_ADMIN_PASSWORD: password,
             HR_READ_CACHE: String(cache),
@@ -527,6 +549,8 @@ async function benchmark() {
         }
         await stop();
         child = undefined;
+        await fixture.close();
+        fixture = undefined;
       }
     }
     const report = {
@@ -538,7 +562,7 @@ async function benchmark() {
       datasets,
       queryPlans,
       keepAlive,
-      methodology: `Separate client/backend processes; compiled production-mode NestJS; temporary file-backed SQLite; synthetic fixtures seeded outside timing; authenticated localhost REST over ${keepAlive ? 'persistent' : 'fresh'} connections; no retries; timings include full response download and JSON parsing; 3 priming reads (first recorded separately); 30 requests per endpoint/concurrency/cache/workload; failures recorded separately and excluded from latency percentiles; separate SQL profiling counts all statement get/all/run executions, including already-prepared cache change counters. CPU, event-loop delay and end-of-phase RSS describe the backend process during each timed condition.`,
+      methodology: `Separate client/backend processes; compiled production-mode NestJS; disposable PostgreSQL database; synthetic fixtures seeded outside timing; authenticated localhost REST over ${keepAlive ? 'persistent' : 'fresh'} connections; no retries; timings include full response download and JSON parsing; 3 priming reads (first recorded separately); 30 requests per endpoint/concurrency/cache/workload; failures recorded separately and excluded from latency percentiles; separate SQL profiling counts all statement get/all/run executions, including already-prepared cache change counters. CPU, event-loop delay and end-of-phase RSS describe the backend process during each timed condition.`,
       results,
     };
     await mkdir(dirname(reportPath), { recursive: true });
@@ -565,6 +589,7 @@ async function benchmark() {
     );
   } finally {
     await stop();
+    await fixture?.close();
     // Delete only this run's resolved temporary directory, never an existing database.
     assert.equal(dirname(directory), resolve(tmpdir()));
     assert.ok(
@@ -582,9 +607,8 @@ async function benchmark() {
     console.log('Cleanup verified: isolated databases removed.');
   }
 }
-
 try {
-  if (process.argv[2] === '--server') await server();
+  if (process.argv[2] === '--server') await inLoadCompany(server);
   else await benchmark();
 } catch (error) {
   console.error(error);

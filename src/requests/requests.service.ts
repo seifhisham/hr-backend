@@ -22,7 +22,10 @@ import type { Attendance } from '../attendance/types/attendance.type.js';
 import { AuditService } from '../audit/audit.service.js';
 import { requireHr } from '../common/security/permissions.js';
 import type { Actor } from '../common/types/actor.type.js';
-import { DatabaseService } from '../database/database.service.js';
+import {
+  DatabaseService,
+  companyContext,
+} from '../database/database.service.js';
 import { EmployeesService } from '../employees/employees.service.js';
 import type { Employee } from '../employees/types/employee.type.js';
 import type {
@@ -31,71 +34,94 @@ import type {
   RequestPageDto,
 } from './dto/request.dto.js';
 import type { EmployeeRequest } from './types/employee-request.type.js';
-
 @Injectable()
 export class RequestsService {
   constructor(
-    @Inject(CompanyService) private readonly companyService: CompanyService,
+    @Inject(CompanyService)
+    private readonly companyService: CompanyService,
     @Inject(SchedulesService)
     private readonly schedulesService: SchedulesService,
-    @Inject(DatabaseService) private readonly store: DatabaseService,
+    @Inject(DatabaseService)
+    private readonly store: DatabaseService,
     @Inject(EmployeesService)
     private readonly employeesService: EmployeesService,
     @Inject(AttendanceService)
     private readonly attendanceService: AttendanceService,
-    @Inject(AuditService) private readonly auditService: AuditService,
+    @Inject(AuditService)
+    private readonly auditService: AuditService,
   ) {}
   private get db() {
     return this.store.db;
   }
-
-  requests(
+  async requests(
     actor: Actor,
     own = false,
     page?: RequestPageDto,
-  ): EmployeeRequest[] {
+  ): Promise<EmployeeRequest[]> {
     if (!own) requireHr(actor);
-    const profiles = new Map<string, Employee>();
-    const employee = own ? this.employeesService.employeeActor(actor) : null;
+    const profiles = new Map<
+      string,
+      | Pick<Employee, 'id' | 'managerId' | 'department' | 'active' | 'role'>
+      | Promise<
+          Pick<Employee, 'id' | 'managerId' | 'department' | 'active' | 'role'>
+        >
+    >();
+    const employee = own
+      ? await this.employeesService.employeeActor(actor)
+      : null;
     if (employee) profiles.set(employee.id, employee);
     const employeeId = employee?.id;
-    return this.db
-      .prepare(
-        `SELECT data FROM employee_requests WHERE 1 = 1
+    return await Promise.all(
+      (
+        await this.db
+          .prepare(
+            `SELECT data FROM employee_requests WHERE 1 = 1
           ${employeeId ? 'AND employee_id = ?' : ''}
           ${page?.status ? 'AND status = ?' : ''}
-          ${page?.before ? 'AND rowid < (SELECT rowid FROM employee_requests WHERE id = ?)' : ''}
-          ORDER BY rowid DESC ${page ? 'LIMIT ?' : ''}`,
-      )
-      .all(
-        ...(employeeId ? [employeeId] : []),
-        ...(page?.status ? [page.status] : []),
-        ...(page?.before ? [page.before] : []),
-        ...(page ? [page.limit] : []),
-      )
-      .map((r) =>
-        this.workflow(
-          JSON.parse(r.data as string) as EmployeeRequest,
-          profiles,
-        ),
-      );
+          ${page?.before ? 'AND row_order < (SELECT row_order FROM employee_requests WHERE id = ?)' : ''}
+          ORDER BY row_order DESC ${page ? 'LIMIT ?' : ''}`,
+          )
+          .all(
+            ...(employeeId ? [employeeId] : []),
+            ...(page?.status ? [page.status] : []),
+            ...(page?.before ? [page.before] : []),
+            ...(page ? [page.limit] : []),
+          )
+      ).map(
+        async (r) =>
+          await this.workflow(
+            JSON.parse(r.data as string) as EmployeeRequest,
+            profiles,
+          ),
+      ),
+    );
   }
-
-  workflow(
+  async workflow(
     request: EmployeeRequest,
-    profiles = new Map<string, Employee>(),
-  ): EmployeeRequest {
+    profiles = new Map<
+      string,
+      | Pick<Employee, 'id' | 'managerId' | 'department' | 'active' | 'role'>
+      | Promise<
+          Pick<Employee, 'id' | 'managerId' | 'department' | 'active' | 'role'>
+        >
+    >(),
+  ): Promise<EmployeeRequest> {
     if (request.status !== 'pending') return request;
-    const profile = (id: string) => {
+    const profile = async (id: string) => {
       let employee = profiles.get(id);
       if (!employee) {
-        employee = this.employeesService.storedEmployee(id);
+        employee =
+          companyContext.getStore()?.actor?.role === 'hr'
+            ? this.employeesService.workflowEmployee(id)
+            : this.employeesService.storedEmployee(id);
         profiles.set(id, employee);
       }
       return employee;
     };
-    const employee = profile(request.employeeId);
-    const manager = employee.managerId ? profile(employee.managerId) : null;
+    const employee = await profile(request.employeeId);
+    const manager = employee.managerId
+      ? await profile(employee.managerId)
+      : null;
     const managerEmployeeId =
       manager?.active && ['manager', 'hr', 'admin'].includes(manager.role)
         ? manager.id
@@ -117,43 +143,52 @@ export class RequestsService {
         : 'not-required',
     };
   }
-
-  managedRequests(actor: Actor, page?: RequestPageDto) {
+  async managedRequests(actor: Actor, page?: RequestPageDto) {
     if (!actor.employeeId) return [];
     if (page?.status && page.status !== 'pending') return [];
-    const profiles = new Map<string, Employee>();
-    return this.db
-      .prepare(
-        `SELECT data FROM employee_requests WHERE status = 'pending'
-          AND employee_id IN (SELECT id FROM employees WHERE json_extract(data, '$.managerId') = ?)
-          AND EXISTS (SELECT 1 FROM employees WHERE id = ? AND json_extract(data, '$.active') = 1 AND json_extract(data, '$.role') IN ('manager', 'hr', 'admin'))
+    const profiles = new Map<
+      string,
+      | Pick<Employee, 'id' | 'managerId' | 'department' | 'active' | 'role'>
+      | Promise<
+          Pick<Employee, 'id' | 'managerId' | 'department' | 'active' | 'role'>
+        >
+    >();
+    return (
+      await Promise.all(
+        (
+          await this.db
+            .prepare(
+              `SELECT data FROM employee_requests WHERE status = 'pending'
+          AND employee_id IN (SELECT id FROM employees WHERE (data::jsonb->>'managerId') = ?)
+          AND EXISTS (SELECT 1 FROM employees WHERE id = ? AND (data::jsonb->>'active') = 'true' AND (data::jsonb->>'role') IN ('manager', 'hr', 'admin'))
           AND employee_id != ?
-          ${page?.before ? 'AND rowid < (SELECT rowid FROM employee_requests WHERE id = ?)' : ''}
-          ORDER BY rowid DESC ${page ? 'LIMIT ?' : ''}`,
-      )
-      .all(
-        actor.employeeId,
-        actor.employeeId,
-        actor.employeeId,
-        ...(page?.before ? [page.before] : []),
-        ...(page ? [page.limit] : []),
-      )
-      .map((row) =>
-        this.workflow(
-          JSON.parse(row.data as string) as EmployeeRequest,
-          profiles,
+          ${page?.before ? 'AND row_order < (SELECT row_order FROM employee_requests WHERE id = ?)' : ''}
+          ORDER BY row_order DESC ${page ? 'LIMIT ?' : ''}`,
+            )
+            .all(
+              actor.employeeId,
+              actor.employeeId,
+              actor.employeeId,
+              ...(page?.before ? [page.before] : []),
+              ...(page ? [page.limit] : []),
+            )
+        ).map(
+          async (row) =>
+            await this.workflow(
+              JSON.parse(row.data as string) as EmployeeRequest,
+              profiles,
+            ),
         ),
       )
-      .filter((request) => request.managerEmployeeId === actor.employeeId);
+    ).filter((request) => request.managerEmployeeId === actor.employeeId);
   }
-
-  reviewRequest(actor: Actor, id: string, input: RequestDecisionDto) {
-    return this.store.transaction(() => {
-      const row = this.db
+  async reviewRequest(actor: Actor, id: string, input: RequestDecisionDto) {
+    return await this.store.transaction(async () => {
+      const row = await this.db
         .prepare('SELECT data FROM employee_requests WHERE id = ?')
         .get(id);
       if (!row) throw new NotFoundException('Request not found');
-      const before = this.workflow(
+      const before = await this.workflow(
         JSON.parse(row.data as string) as EmployeeRequest,
       );
       if (
@@ -178,10 +213,10 @@ export class RequestsService {
           reason: input.reason,
         },
       };
-      this.db
+      await this.db
         .prepare('UPDATE employee_requests SET data = ? WHERE id = ?')
         .run(JSON.stringify(after), id);
-      this.auditService.record(
+      await this.auditService.record(
         actor,
         'request.manager_reviewed',
         id,
@@ -192,16 +227,15 @@ export class RequestsService {
       return after;
     });
   }
-
-  submitRequest(actor: Actor, input: SubmitRequestDto) {
-    const employee = this.employeesService.employeeActor(actor);
+  async submitRequest(actor: Actor, input: SubmitRequestDto) {
+    const employee = await this.employeesService.employeeActor(actor);
     if (!employee.active) throw new ForbiddenException('Employee is inactive');
-    return this.store.transaction(() => {
+    return await this.store.transaction(async () => {
       let originalAttendance: Attendance | null = null;
       if (input.type === 'forgotten-check-out') {
-        const row = this.db
+        const row = (await this.db
           .prepare('SELECT * FROM attendance WHERE id = ? AND employee_id = ?')
-          .get(input.attendanceId, employee.id) as AttendanceRow | undefined;
+          .get(input.attendanceId, employee.id)) as AttendanceRow | undefined;
         if (!row) throw new NotFoundException('Attendance record not found');
         if (row.check_out)
           throw new ConflictException('Attendance is already closed');
@@ -224,7 +258,7 @@ export class RequestsService {
           date <= input.to;
           date = shiftDate(date, 1)
         ) {
-          const shift = this.schedulesService.assignedSchedule(
+          const shift = await this.schedulesService.assignedSchedule(
             employee.id,
             date,
           );
@@ -240,8 +274,24 @@ export class RequestsService {
             );
         }
       }
-      this.checkExcuseAllowance(employee.id, input);
-      this.checkRequestOverlap(employee.id, input);
+      if (input.type !== 'forgotten-check-out') {
+        const scope = await this.db
+          .prepare(
+            'SELECT hr_branch_at(?,?) AS first,hr_branch_at(?,?) AS last',
+          )
+          .get(employee.id, input.from, employee.id, input.to);
+        const boundary = await this.db
+          .prepare(
+            'SELECT 1 FROM employee_branches WHERE employee_id=? AND effective_from>? AND effective_from<=?',
+          )
+          .get(employee.id, input.from, input.to);
+        if (!scope?.first || scope.first !== scope.last || boundary)
+          throw new BadRequestException(
+            'Split requests at branch assignment changes',
+          );
+      }
+      await this.checkExcuseAllowance(employee.id, input);
+      await this.checkRequestOverlap(employee.id, input);
       const result: EmployeeRequest = {
         ...input,
         id: randomUUID(),
@@ -257,10 +307,12 @@ export class RequestsService {
         salaryDeductionDays: null,
         attendance: originalAttendance,
       };
-      this.db
-        .prepare('INSERT INTO employee_requests VALUES (?, ?, ?, ?)')
+      await this.db
+        .prepare(
+          'INSERT INTO employee_requests (id,employee_id,status,data) VALUES (?, ?, ?, ?)',
+        )
         .run(result.id, employee.id, result.status, JSON.stringify(result));
-      this.auditService.record(
+      await this.auditService.record(
         actor,
         'request.submitted',
         result.id,
@@ -268,18 +320,22 @@ export class RequestsService {
         result,
         input.reason,
       );
-      return this.workflow(result);
+      return await this.workflow(result);
     });
   }
-
-  private checkExcuseAllowance(
+  private async checkExcuseAllowance(
     employeeId: string,
     input: SubmitRequestDto,
     excludeId?: string,
   ) {
     if (input.type !== 'excuse') return;
     const minutesByMonth = (
-      request: Extract<SubmitRequestDto, { type: 'excuse' }>,
+      request: Extract<
+        SubmitRequestDto,
+        {
+          type: 'excuse';
+        }
+      >,
     ) => {
       const months = new Map<string, number>();
       for (
@@ -292,15 +348,23 @@ export class RequestsService {
       }
       return months;
     };
-    const existing = this.db
-      .prepare(
-        "SELECT data FROM employee_requests WHERE employee_id = ? AND status IN ('pending', 'approved')",
-      )
-      .all(employeeId)
+    const existing = (
+      await this.db
+        .prepare(
+          "SELECT data FROM employee_requests WHERE employee_id = ? AND status IN ('pending', 'approved')",
+        )
+        .all(employeeId)
+    )
       .map((row) => JSON.parse(row.data as string) as EmployeeRequest)
       .filter(
-        (request): request is Extract<EmployeeRequest, { type: 'excuse' }> =>
-          request.id !== excludeId && request.type === 'excuse',
+        (
+          request,
+        ): request is Extract<
+          EmployeeRequest,
+          {
+            type: 'excuse';
+          }
+        > => request.id !== excludeId && request.type === 'excuse',
       )
       .map(minutesByMonth);
     for (const [month, candidateMinutes] of minutesByMonth(input)) {
@@ -319,18 +383,18 @@ export class RequestsService {
         );
     }
   }
-
-  private checkRequestOverlap(
+  private async checkRequestOverlap(
     employeeId: string,
     input: SubmitRequestDto,
     excludeId?: string,
   ) {
-    const conflicts = this.db
-      .prepare(
-        "SELECT data FROM employee_requests WHERE employee_id = ? AND status IN ('pending', 'approved')",
-      )
-      .all(employeeId)
-      .map((r) => JSON.parse(r.data as string) as EmployeeRequest);
+    const conflicts = (
+      await this.db
+        .prepare(
+          "SELECT data FROM employee_requests WHERE employee_id = ? AND status IN ('pending', 'approved')",
+        )
+        .all(employeeId)
+    ).map((r) => JSON.parse(r.data as string) as EmployeeRequest);
     if (
       conflicts.some(
         (r) =>
@@ -350,15 +414,14 @@ export class RequestsService {
         'A pending or approved request already covers this attendance record or date range',
       );
   }
-
-  changeRequest(
+  async changeRequest(
     actor: Actor,
     id: string,
     action: 'withdraw' | 'reopen',
     reason: string,
   ) {
-    return this.store.transaction(() => {
-      const row = this.db
+    return await this.store.transaction(async () => {
+      const row = await this.db
         .prepare('SELECT data FROM employee_requests WHERE id = ?')
         .get(id);
       if (!row) throw new NotFoundException('Request not found');
@@ -372,7 +435,7 @@ export class RequestsService {
           throw new ConflictException('Only pending requests can be withdrawn');
       } else {
         requireHr(actor);
-        requireUnlockedRequest(this.db, id);
+        await requireUnlockedRequest(this.db, id);
         if (before.employeeId === actor.employeeId)
           throw new ForbiddenException('You cannot reopen your own request');
         if (before.status !== 'approved')
@@ -381,10 +444,10 @@ export class RequestsService {
           throw new ConflictException(
             'Use attendance correction for an approved forgotten check-out',
           );
-        this.checkExcuseAllowance(before.employeeId, before, id);
-        this.checkRequestOverlap(before.employeeId, before, id);
+        await this.checkExcuseAllowance(before.employeeId, before, id);
+        await this.checkRequestOverlap(before.employeeId, before, id);
       }
-      const after: EmployeeRequest = this.workflow({
+      const after: EmployeeRequest = await this.workflow({
         ...before,
         status: action === 'withdraw' ? 'withdrawn' : 'pending',
         ...(action === 'reopen' ? { managerReview: null } : {}),
@@ -399,12 +462,12 @@ export class RequestsService {
           by: actor.name,
         },
       });
-      this.db
+      await this.db
         .prepare(
           'UPDATE employee_requests SET status = ?, data = ? WHERE id = ?',
         )
         .run(after.status, JSON.stringify(after), id);
-      this.auditService.record(
+      await this.auditService.record(
         actor,
         `request.${action === 'withdraw' ? 'withdrawn' : 'reopened'}`,
         id,
@@ -412,18 +475,17 @@ export class RequestsService {
         after,
         reason,
       );
-      return this.workflow(after);
+      return await this.workflow(after);
     });
   }
-
-  decideRequest(actor: Actor, id: string, input: RequestDecisionDto) {
+  async decideRequest(actor: Actor, id: string, input: RequestDecisionDto) {
     requireHr(actor);
-    return this.store.transaction(() => {
-      const row = this.db
+    return await this.store.transaction(async () => {
+      const row = await this.db
         .prepare('SELECT data FROM employee_requests WHERE id = ?')
         .get(id);
       if (!row) throw new NotFoundException('Request not found');
-      const before = this.workflow(
+      const before = await this.workflow(
         JSON.parse(row.data as string) as EmployeeRequest,
       );
       if (before.employeeId === actor.employeeId)
@@ -442,28 +504,31 @@ export class RequestsService {
           'The manager reviewer cannot give the final HR decision',
         );
       if (before.type !== 'forgotten-check-out')
-        requireUnlockedPayroll(
+        await requireUnlockedPayroll(
           this.db,
           localTime(
             new Date(),
-            this.companyService.settings().timezone,
+            (await this.companyService.settings()).timezone,
           ).date.slice(0, 7),
         );
       if (input.status === 'approved') {
-        if (!this.employeesService.employee(before.employeeId).active)
+        if (
+          !(await this.employeesService.workflowEmployee(before.employeeId))
+            .active
+        )
           throw new ConflictException('Employee is inactive');
-        this.checkExcuseAllowance(before.employeeId, before, id);
-        this.checkRequestOverlap(before.employeeId, before, id);
+        await this.checkExcuseAllowance(before.employeeId, before, id);
+        await this.checkRequestOverlap(before.employeeId, before, id);
         if (before.type === 'forgotten-check-out') {
-          const record = this.db
+          const record = (await this.db
             .prepare(
               'SELECT * FROM attendance WHERE id = ? AND employee_id = ?',
             )
-            .get(before.attendanceId, before.employeeId) as
+            .get(before.attendanceId, before.employeeId)) as
             AttendanceRow | undefined;
           if (!record || record.check_out)
             throw new ConflictException('Attendance is no longer open');
-          this.attendanceService.correctInTransaction(actor, record.id, {
+          await this.attendanceService.correctInTransaction(actor, record.id, {
             checkIn: record.check_in,
             checkOut: before.proposedCheckOut,
             reason: `Request ${id}: ${input.reason}`,
@@ -483,12 +548,12 @@ export class RequestsService {
               ? 1
               : 3,
       };
-      this.db
+      await this.db
         .prepare(
           'UPDATE employee_requests SET status = ?, data = ? WHERE id = ?',
         )
         .run(after.status, JSON.stringify(after), id);
-      this.auditService.record(
+      await this.auditService.record(
         actor,
         `request.${input.status}`,
         id,

@@ -19,6 +19,7 @@ export const filtersSchema = z
     from: dateSchema,
     to: dateSchema,
     employeeId: z.string().uuid().optional(),
+    branchId: z.uuid().optional(),
     department: text.optional(),
     status: z
       .enum([

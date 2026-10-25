@@ -9,7 +9,6 @@ import { AuthService } from '../src/auth/auth.service.js';
 import { DatabaseService } from '../src/database/database.service.js';
 import { tokenHash } from '../src/common/security/credentials.js';
 import { RATE_LIMITS } from '../src/common/security/rate-limit.guard.js';
-
 it('limits real routes by account before expensive work and keeps ordinary routes available', async () => {
   vi.stubEnv('HR_DATABASE_PATH', ':memory:');
   vi.stubEnv('HR_ADMIN_EMAIL', 'limits@test.local');
@@ -20,13 +19,11 @@ it('limits real routes by account before expensive work and keeps ordinary route
   await app.init();
   try {
     const db = app.get(DatabaseService).db;
-    const user = db.prepare('SELECT id FROM users LIMIT 1').get()!;
+    const user = (await db.prepare('SELECT id FROM users LIMIT 1').get())!;
     for (const token of ['first-session', 'second-session']) {
-      db.prepare('INSERT INTO sessions VALUES (?, ?, ?)').run(
-        tokenHash(token),
-        user.id,
-        '2099-01-01T00:00:00.000Z',
-      );
+      await db
+        .prepare('INSERT INTO sessions (hash,user_id,expires) VALUES (?, ?, ?)')
+        .run(tokenHash(token), user.id, '2099-01-01T00:00:00.000Z');
     }
     const http = app.getHttpServer();
     const auth = { Authorization: 'Bearer first-session' };
@@ -35,7 +32,7 @@ it('limits real routes by account before expensive work and keeps ordinary route
       .mockResolvedValue([]);
     const sales = vi
       .spyOn(app.get(SalesService), 'performance')
-      .mockReturnValue([]);
+      .mockResolvedValue([]);
     for (let i = 0; i < RATE_LIMITS.reports.requests; i++) {
       const path =
         i % 2
@@ -62,7 +59,6 @@ it('limits real routes by account before expensive work and keeps ordinary route
       .set(auth)
       .expect(429);
     expect(report).toHaveBeenCalledTimes(30);
-
     const prepare = vi
       .spyOn(app.get(AttendanceEvidence), 'prepare')
       .mockRejectedValue(new BadRequestException('Invalid evidence'));
@@ -84,7 +80,6 @@ it('limits real routes by account before expensive work and keeps ordinary route
       .attach('unexpected', Buffer.from('invalid photo'), 'photo.jpg')
       .expect(429);
     expect(prepare).toHaveBeenCalledTimes(10);
-
     const password = vi
       .spyOn(app.get(AuthService), 'changePassword')
       .mockResolvedValue({ message: 'Password changed. Sign in again.' });

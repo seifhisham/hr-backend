@@ -1,7 +1,39 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseService } from './database.service.js';
+import { LegacySqliteStore as DatabaseService } from './legacy-sqlite.js';
+import { DATABASE_SCHEMA } from './database.schema.js';
+
+it('backfills the legacy department catalog without changing employee records', () => {
+  vi.stubEnv('HR_DATABASE_PATH', ':memory:');
+  const store = new DatabaseService();
+  try {
+    const data = JSON.stringify({
+      department: 'Engineering',
+      nationalId: '001234',
+    });
+    store.db
+      .prepare('INSERT INTO employees VALUES(?,?,?,?)')
+      .run('legacy-department', '001234', 'department@test.local', data);
+    store.db.exec(DATABASE_SCHEMA);
+    expect(store.db.prepare('SELECT name FROM departments').all()).toEqual([
+      { name: 'Engineering' },
+    ]);
+    store.db.prepare('DELETE FROM departments WHERE name=?').run('Engineering');
+    store.db.exec(DATABASE_SCHEMA);
+    expect(store.db.prepare('SELECT name FROM departments').all()).toEqual([
+      { name: 'Engineering' },
+    ]);
+    expect(
+      store.db
+        .prepare('SELECT data FROM employees WHERE id=?')
+        .get('legacy-department')!.data,
+    ).toBe(data);
+  } finally {
+    store.onModuleDestroy();
+    vi.unstubAllEnvs();
+  }
+});
 
 it('backfills legacy schedule history once and preserves versions and assignments across restart', () => {
   const directory = mkdtempSync(join(tmpdir(), 'hr-schedule-history-'));
@@ -20,18 +52,16 @@ it('backfills legacy schedule history once and preserves versions and assignment
     store.db
       .prepare('INSERT INTO schedules VALUES (?, ?)')
       .run(schedule.id, JSON.stringify(schedule));
-    store.db
-      .prepare('INSERT INTO employees VALUES (?, ?, ?, ?)')
-      .run(
-        'legacy-employee',
-        '001234',
-        'legacy@test.local',
-        JSON.stringify({
-          id: 'legacy-employee',
-          startDate: '2026-09-01',
-          scheduleId: schedule.id,
-        }),
-      );
+    store.db.prepare('INSERT INTO employees VALUES (?, ?, ?, ?)').run(
+      'legacy-employee',
+      '001234',
+      'legacy@test.local',
+      JSON.stringify({
+        id: 'legacy-employee',
+        startDate: '2026-09-01',
+        scheduleId: schedule.id,
+      }),
+    );
     store.onModuleDestroy();
     store = new DatabaseService();
     expect(store.db.prepare('SELECT * FROM employee_schedules').all()).toEqual([

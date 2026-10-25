@@ -3,7 +3,6 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { AppModule } from '../src/app.module.js';
 import { DatabaseService } from '../src/database/database.service.js';
-
 it('negotiates gzip without changing report rows, privacy headers or CSV exports', async () => {
   vi.stubEnv('HR_DATABASE_PATH', ':memory:');
   vi.stubEnv('HR_ADMIN_EMAIL', 'compression@test.local');
@@ -14,10 +13,12 @@ it('negotiates gzip without changing report rows, privacy headers or CSV exports
   await app.init();
   try {
     const db = app.get(DatabaseService).db;
-    const schedule = db.prepare('SELECT id FROM schedules LIMIT 1').get()!
-      .id as string;
+    const schedule = (await db
+      .prepare('SELECT id FROM schedules LIMIT 1')
+      .get())!.id as string;
     for (let i = 0; i < 20; i++) {
       const employee = {
+        employeeNumber: `EMP-${i}`,
         id: randomUUID(),
         nationalId: `COMPRESS-${i}`,
         name: `Private employee ${i}`,
@@ -26,17 +27,21 @@ it('negotiates gzip without changing report rows, privacy headers or CSV exports
         startDate: '2026-01-01',
         scheduleId: schedule,
       };
-      db.prepare('INSERT INTO employees VALUES (?, ?, ?, ?)').run(
-        employee.id,
-        employee.nationalId,
-        `compress-${i}@test.local`,
-        JSON.stringify(employee),
-      );
-      db.prepare('INSERT INTO employee_schedules VALUES (?, ?, ?)').run(
-        employee.id,
-        '2026-01-01',
-        schedule,
-      );
+      await db
+        .prepare(
+          'INSERT INTO employees (id,code,email,data) VALUES (?, ?, ?, ?)',
+        )
+        .run(
+          employee.id,
+          employee.nationalId,
+          `compress-${i}@test.local`,
+          JSON.stringify(employee),
+        );
+      await db
+        .prepare(
+          'INSERT INTO employee_schedules (employee_id,effective_from,schedule_id) VALUES (?, ?, ?)',
+        )
+        .run(employee.id, '2026-01-01', schedule);
     }
     const login = await request(app.getHttpServer())
       .post('/api/auth/login')

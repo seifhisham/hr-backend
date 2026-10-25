@@ -1,3 +1,4 @@
+import { testCompanyId } from './postgres.setup.js';
 import { CompanyService } from '../src/company/company.service.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,6 +16,7 @@ import { AttendanceLocationService } from '../src/attendance/attendance-location
 import { AuditService } from '../src/audit/audit.service.js';
 import { AuthService } from '../src/auth/auth.service.js';
 import { DatabaseService } from '../src/database/database.service.js';
+import { LegacySqliteStore } from '../src/database/legacy-sqlite.js';
 import { DATABASE_SCHEMA } from '../src/database/database.schema.js';
 import type { Employee } from '../src/employees/types/employee.type.js';
 import { EmployeesService } from '../src/employees/employees.service.js';
@@ -22,7 +24,6 @@ import { SchedulesService } from '../src/schedules/schedules.service.js';
 import { RequestsService } from '../src/requests/requests.service.js';
 import { PayrollService } from '../src/payroll/payroll.service.js';
 import type { Schedule } from '../src/schedules/types/schedule.type.js';
-
 describe('HR REST API', () => {
   let app: INestApplication;
   let adminToken: string;
@@ -34,6 +35,21 @@ describe('HR REST API', () => {
   const employeePassword = 'Test-employee-password-2026';
   const server = () => app.getHttpServer();
   const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
+  const grantHr = async (email: string) => {
+    const db = app.get(DatabaseService);
+    const user = await db
+      .prepare('SELECT id FROM users WHERE lower(email)=lower(?)')
+      .get(email);
+    const branch = await db.prepare('SELECT id FROM branches LIMIT 1').get();
+    await request(server())
+      .patch('/api/hr-accounts/' + String(user!.id) + '/branches')
+      .set(auth(adminToken))
+      .send({
+        branchIds: [branch!.id],
+        reason: 'Fixture explicitly grants the original branch',
+      })
+      .expect(200);
+  };
   const submit = (
     path: string,
     token: string,
@@ -58,7 +74,6 @@ describe('HR REST API', () => {
     const { id: _id, employeeNumber: _employeeNumber, ...values } = employee;
     return values;
   };
-
   const locationUpdate = (
     id: string,
     changes: Record<string, unknown> = {},
@@ -75,38 +90,85 @@ describe('HR REST API', () => {
         capturedAt: new Date().toISOString(),
         ...changes,
       });
-
   it('uses separate configured departure radius and grace period, preserving running deadlines', async () => {
-    const settings = app.get(CompanyService).settings();
-    await request(server()).patch('/api/settings').set(auth(employeeToken))
-      .send({ ...settings, trackingRadiusMeters: 500, trackingGraceMinutes: 1 }).expect(403);
-    for (const changes of [{ trackingRadiusMeters: 0 }, { trackingGraceMinutes: 0 }, { trackingGraceMinutes: 1.5 }]) {
-      await request(server()).patch('/api/settings').set(auth(adminToken)).send({ ...settings, ...changes }).expect(400);
+    const settings = await app.get(CompanyService).settings();
+    await request(server())
+      .patch('/api/settings')
+      .set(auth(employeeToken))
+      .send({ ...settings, trackingRadiusMeters: 500, trackingGraceMinutes: 1 })
+      .expect(403);
+    for (const changes of [
+      { trackingRadiusMeters: 0 },
+      { trackingGraceMinutes: 0 },
+      { trackingGraceMinutes: 1.5 },
+    ]) {
+      await request(server())
+        .patch('/api/settings')
+        .set(auth(adminToken))
+        .send({ ...settings, ...changes })
+        .expect(400);
     }
-    await request(server()).patch('/api/settings').set(auth(adminToken))
-      .send({ ...settings, trackingRadiusMeters: 500, trackingGraceMinutes: 1 }).expect(200);
-    const policy = (await request(server()).get('/api/attendance/policy').set(auth(employeeToken)).expect(200)).body;
-    expect(policy).toMatchObject({ radiusMeters: 50, tracking: { radiusMeters: 500, graceSeconds: 60 } });
-    const record = (await submit('/api/attendance/check-in', employeeToken).expect(201)).body;
+    await request(server())
+      .patch('/api/settings')
+      .set(auth(adminToken))
+      .send({ ...settings, trackingRadiusMeters: 500, trackingGraceMinutes: 1 })
+      .expect(200);
+    const policy = (
+      await request(server())
+        .get('/api/attendance/policy')
+        .set(auth(employeeToken))
+        .expect(200)
+    ).body;
+    expect(policy).toMatchObject({
+      radiusMeters: 50,
+      tracking: { radiusMeters: 500, graceSeconds: 60 },
+    });
+    const record = (
+      await submit('/api/attendance/check-in', employeeToken).expect(201)
+    ).body;
     // This reading is outside the old 150m boundary but inside the new 500m boundary.
-    expect((await locationUpdate(record.id).expect(201)).body).toMatchObject({ status: 'inside', returnBy: null });
+    expect((await locationUpdate(record.id).expect(201)).body).toMatchObject({
+      status: 'inside',
+      returnBy: null,
+    });
     vi.setSystemTime(new Date('2026-10-04T07:00:30Z'));
     await locationUpdate(record.id, { latitude: 30.03 }).expect(201);
     vi.setSystemTime(new Date('2026-10-04T07:01:00Z'));
-    const warning = (await locationUpdate(record.id, { latitude: 30.03 }).expect(201)).body;
+    const warning = (
+      await locationUpdate(record.id, { latitude: 30.03 }).expect(201)
+    ).body;
     expect(warning.returnBy).toBe('2026-10-04T07:02:00.000Z');
-    await request(server()).patch('/api/settings').set(auth(adminToken))
-      .send({ ...settings, trackingRadiusMeters: 500, trackingGraceMinutes: 2 }).expect(200);
+    await request(server())
+      .patch('/api/settings')
+      .set(auth(adminToken))
+      .send({ ...settings, trackingRadiusMeters: 500, trackingGraceMinutes: 2 })
+      .expect(200);
     vi.setSystemTime(new Date('2026-10-04T07:01:30Z'));
-    expect((await locationUpdate(record.id, { latitude: 30.03 }).expect(201)).body.returnBy).toBe(warning.returnBy);
-    app.get(AttendanceLocationService).sweep();
-    expect(app.get(DatabaseService).db.prepare('SELECT check_out FROM attendance WHERE id = ?').get(record.id)?.check_out).toBeNull();
+    expect(
+      (await locationUpdate(record.id, { latitude: 30.03 }).expect(201)).body
+        .returnBy,
+    ).toBe(warning.returnBy);
+    await app.get(AttendanceLocationService).sweep();
+    expect(
+      (
+        await app
+          .get(DatabaseService)
+          .db.prepare('SELECT check_out FROM attendance WHERE id = ?')
+          .get(record.id)
+      )?.check_out,
+    ).toBeNull();
     vi.setSystemTime(new Date('2026-10-04T07:02:00Z'));
     await locationUpdate(record.id, { latitude: 30.03 }).expect(201);
-    app.get(AttendanceLocationService).sweep();
-    expect(app.get(DatabaseService).db.prepare('SELECT check_out FROM attendance WHERE id = ?').get(record.id)?.check_out).toBe(warning.returnBy);
+    await app.get(AttendanceLocationService).sweep();
+    expect(
+      (
+        await app
+          .get(DatabaseService)
+          .db.prepare('SELECT check_out FROM attendance WHERE id = ?')
+          .get(record.id)
+      )?.check_out,
+    ).toBe(warning.returnBy);
   });
-
   it('confirms departure, persists a five-minute deadline, and checks out once with an audit', async () => {
     const record = (
       await submit('/api/attendance/check-in', employeeToken).expect(201)
@@ -138,8 +200,8 @@ describe('HR REST API', () => {
       );
       await locationUpdate(record.id).expect(201);
     }
-    processor.sweep();
-    processor.sweep();
+    await processor.sweep();
+    await processor.sweep();
     const mine = (
       await request(server())
         .get('/api/attendance/me')
@@ -150,22 +212,25 @@ describe('HR REST API', () => {
     expect(mine.location.status).toBe('auto-checked-out');
     expect(mine.location.actor).toBeUndefined();
     expect(
-      app
-        .get(DatabaseService)
-        .db.prepare(
-          "SELECT COUNT(*) AS total FROM audit WHERE action = 'attendance.auto_checked_out'",
-        )
-        .get()?.total,
+      (
+        await app
+          .get(DatabaseService)
+          .db.prepare(
+            "SELECT COUNT(*) AS total FROM audit WHERE action = 'attendance.auto_checked_out'",
+          )
+          .get()
+      )?.total,
     ).toBe(1);
     await locationUpdate(record.id).expect(409);
     expect(
-      app
-        .get(DatabaseService)
-        .db.prepare('SELECT COUNT(*) AS total FROM payroll_deductions')
-        .get()?.total,
+      (
+        await app
+          .get(DatabaseService)
+          .db.prepare('SELECT COUNT(*) AS total FROM payroll_deductions')
+          .get()
+      )?.total,
     ).toBe(0);
   });
-
   it('cancels departure on return and never checks out for unavailable, uncertain or missing location', async () => {
     const record = (
       await submit('/api/attendance/check-in', employeeToken).expect(201)
@@ -188,7 +253,7 @@ describe('HR REST API', () => {
       .set(auth(employeeToken))
       .send({ available: false })
       .expect(201);
-    expect(processor.view(record.id)).toMatchObject({
+    expect(await processor.view(record.id)).toMatchObject({
       status: 'unavailable',
       returnBy: null,
     });
@@ -211,16 +276,18 @@ describe('HR REST API', () => {
     vi.setSystemTime(new Date('2026-10-04T07:04:00Z'));
     await locationUpdate(record.id).expect(201);
     vi.setSystemTime(new Date('2026-10-04T07:10:00Z'));
-    processor.sweep();
-    expect(processor.view(record.id)).toMatchObject({
+    await processor.sweep();
+    expect(await processor.view(record.id)).toMatchObject({
       status: 'unavailable',
       returnBy: null,
     });
     expect(
-      app
-        .get(DatabaseService)
-        .db.prepare('SELECT check_out FROM attendance WHERE id = ?')
-        .get(record.id)?.check_out,
+      (
+        await app
+          .get(DatabaseService)
+          .db.prepare('SELECT check_out FROM attendance WHERE id = ?')
+          .get(record.id)
+      )?.check_out,
     ).toBeNull();
     const report = (
       await request(server())
@@ -230,15 +297,16 @@ describe('HR REST API', () => {
     ).body;
     expect(report[0].location.status).toBe('unavailable');
     expect(
-      app
-        .get(DatabaseService)
-        .db.prepare('SELECT COUNT(*) AS total FROM payroll_deductions')
-        .get()?.total,
+      (
+        await app
+          .get(DatabaseService)
+          .db.prepare('SELECT COUNT(*) AS total FROM payroll_deductions')
+          .get()
+      )?.total,
     ).toBe(0);
     const resumed = (await locationUpdate(record.id).expect(201)).body;
     expect(resumed.returnBy).toBeNull();
   });
-
   it('rolls back automatic checkout if the audit fails and clears monitoring on HR correction', async () => {
     const record = (
       await submit('/api/attendance/check-in', employeeToken).expect(201)
@@ -258,16 +326,20 @@ describe('HR REST API', () => {
         throw new Error('Audit unavailable');
       });
     const processor = app.get(AttendanceLocationService);
-    expect(() => processor.sweep()).toThrow('Audit unavailable');
+    await expect((async () => await processor.sweep())()).rejects.toThrow(
+      'Audit unavailable',
+    );
     expect(
-      app
-        .get(DatabaseService)
-        .db.prepare('SELECT check_out FROM attendance WHERE id = ?')
-        .get(record.id)?.check_out,
+      (
+        await app
+          .get(DatabaseService)
+          .db.prepare('SELECT check_out FROM attendance WHERE id = ?')
+          .get(record.id)
+      )?.check_out,
     ).toBeNull();
-    expect(processor.view(record.id)?.status).toBe('outside');
+    expect((await processor.view(record.id))?.status).toBe('outside');
     audit.mockRestore();
-    processor.sweep();
+    await processor.sweep();
     await request(server())
       .patch(`/api/attendance/${record.id}`)
       .set(auth(adminToken))
@@ -277,16 +349,17 @@ describe('HR REST API', () => {
         reason: 'Reopened after reviewing location evidence',
       })
       .expect(200);
-    expect(processor.view(record.id)).toBeNull();
-    processor.sweep();
+    expect(await processor.view(record.id)).toBeNull();
+    await processor.sweep();
     expect(
-      app
-        .get(DatabaseService)
-        .db.prepare('SELECT check_out FROM attendance WHERE id = ?')
-        .get(record.id)?.check_out,
+      (
+        await app
+          .get(DatabaseService)
+          .db.prepare('SELECT check_out FROM attendance WHERE id = ?')
+          .get(record.id)
+      )?.check_out,
     ).toBeNull();
   });
-
   it('protects location ownership and rejects forged, stale and out-of-order payloads', async () => {
     const record = (
       await submit('/api/attendance/check-in', employeeToken).expect(201)
@@ -327,18 +400,16 @@ describe('HR REST API', () => {
     await locationUpdate(record.id).expect(409);
     vi.setSystemTime(new Date('2026-10-04T07:00:30Z'));
     await locationUpdate(record.id).expect(201);
-    const deadline = app
-      .get(AttendanceLocationService)
-      .view(record.id)?.returnBy;
+    const deadline = (await app.get(AttendanceLocationService).view(record.id))
+      ?.returnBy;
     await submit(
       `/api/attendance/${record.id}/check-out`,
       employeeToken,
     ).expect(201);
     vi.setSystemTime(new Date(deadline!));
-    app.get(AttendanceLocationService).sweep();
-    expect(app.get(AttendanceLocationService).view(record.id)).toBeNull();
+    await app.get(AttendanceLocationService).sweep();
+    expect(await app.get(AttendanceLocationService).view(record.id)).toBeNull();
   });
-
   const salaryForApproval = async (salary = 3000) => {
     await request(server())
       .patch(`/api/employees/${employee.id}`)
@@ -354,7 +425,10 @@ describe('HR REST API', () => {
         .expect(200)
     ).body;
   const approvePayroll = (
-    run: { month: string; revision: string },
+    run: {
+      month: string;
+      revision: string;
+    },
     token = adminToken,
   ) =>
     request(server()).post('/api/payroll/approve').set(auth(token)).send({
@@ -362,7 +436,6 @@ describe('HR REST API', () => {
       expectedRevision: run.revision,
       reason: 'Reviewed salaries and deductions',
     });
-
   it('freezes approved payroll salaries, employee details and deduction breakdowns', async () => {
     await salaryForApproval();
     const vacation = await workflowRequest();
@@ -438,7 +511,6 @@ describe('HR REST API', () => {
     ).toHaveLength(1);
     expect(audit.body[0].after.rows).toEqual(approved.body.rows);
   });
-
   it('blocks changes to locked payroll while permitting non-financial attendance corrections', async () => {
     await salaryForApproval();
     const vacation = await workflowRequest();
@@ -493,7 +565,6 @@ describe('HR REST API', () => {
     await hrDecision(forgotten.id).expect(200);
     expect((await payrollRun()).rows[0].deductionDays).toBe(1);
   });
-
   it('rejects stale payroll approval and approves only the newly reviewed values', async () => {
     await salaryForApproval();
     const stale = await payrollRun();
@@ -521,7 +592,6 @@ describe('HR REST API', () => {
       netSalary: 3480,
     });
   });
-
   it('validates payroll approval, prevents employee access and requires configured salaries', async () => {
     const draft = await payrollRun();
     await request(server()).get('/api/payroll/run?month=2026-10').expect(401);
@@ -552,18 +622,12 @@ describe('HR REST API', () => {
     await approvePayroll(await payrollRun('2026-11')).expect(400);
     await approvePayroll(await payrollRun('2026-09')).expect(409);
   });
-
   it('keeps payroll approved and unchanged after restarting with the saved database', async () => {
     await salaryForApproval();
     const approved = (await approvePayroll(await payrollRun()).expect(201))
       .body;
-    const directory = mkdtempSync(join(tmpdir(), 'hr-payroll-lock-'));
-    const path = join(directory, 'hr.sqlite');
     let restarted: INestApplication | undefined;
-    const previousPath = process.env.HR_DATABASE_PATH;
     try {
-      app.get(DatabaseService).db.prepare('VACUUM INTO ?').run(path);
-      vi.stubEnv('HR_DATABASE_PATH', path);
       const module = await Test.createTestingModule({
         imports: [AppModule],
       }).compile();
@@ -587,12 +651,9 @@ describe('HR REST API', () => {
         .expect(409);
     } finally {
       await restarted?.close();
-      vi.stubEnv('HR_DATABASE_PATH', previousPath ?? ':memory:');
-      rmSync(directory, { recursive: true });
     }
   });
-
-  it('allows HR to approve configured zero salaries and records the approving identity', async () => {
+  it('allows only administrators to approve zero salaries and records the approving identity', async () => {
     await salaryForApproval(0);
     const hr = (
       await request(server())
@@ -609,6 +670,7 @@ describe('HR REST API', () => {
         })
         .expect(201)
     ).body;
+    await grantHr(hr.email);
     const login = await request(server())
       .post('/api/auth/login')
       .send({ email: hr.email, password: employeePassword })
@@ -617,12 +679,11 @@ describe('HR REST API', () => {
       .get('/api/payroll/run?month=2026-10')
       .set(auth(login.body.token))
       .expect(200);
-    const approved = await approvePayroll(draft.body, login.body.token).expect(
-      201,
-    );
+    await approvePayroll(draft.body, login.body.token).expect(403);
+    const approved = await approvePayroll(await payrollRun()).expect(201);
     expect(approved.body).toMatchObject({
-      approvedBy: 'Payroll HR',
-      approvedById: login.body.user.id,
+      approvedBy: 'Company Administrator',
+      approvedById: (await app.get(AuthService).authenticate(adminToken)).id,
       status: 'approved',
     });
     expect(
@@ -632,37 +693,38 @@ describe('HR REST API', () => {
       ),
     ).toBe(true);
   });
-
   it('rolls back payroll approval when its audit cannot be saved', async () => {
     await salaryForApproval();
     const draft = await payrollRun();
-    const actor = app.get(AuthService).authenticate(adminToken);
+    const actor = await app.get(AuthService).authenticate(adminToken);
     const audit = vi
       .spyOn(app.get(AuditService), 'record')
       .mockImplementationOnce(() => {
         throw new Error('Audit unavailable');
       });
     try {
-      expect(() =>
-        app.get(PayrollService).approve(actor, {
-          month: draft.month,
-          expectedRevision: draft.revision,
-          reason: 'Reviewed salaries and deductions',
-        }),
-      ).toThrow('Audit unavailable');
+      await expect(
+        (async () =>
+          await app.get(PayrollService).approve(actor, {
+            month: draft.month,
+            expectedRevision: draft.revision,
+            reason: 'Reviewed salaries and deductions',
+          }))(),
+      ).rejects.toThrow('Audit unavailable');
       expect((await payrollRun()).status).toBe('draft');
       expect(
-        app
-          .get(DatabaseService)
-          .db.prepare('SELECT COUNT(*) AS count FROM payroll_runs')
-          .get()?.count,
+        (
+          await app
+            .get(DatabaseService)
+            .db.prepare('SELECT COUNT(*) AS count FROM payroll_runs')
+            .get()
+        )?.count,
       ).toBe(0);
     } finally {
       audit.mockRestore();
     }
     await approvePayroll(draft).expect(201);
   });
-
   const createManager = async (
     suffix: string,
     department = 'Engineering',
@@ -731,7 +793,6 @@ describe('HR REST API', () => {
         .set(auth(token))
         .expect(200)
     ).body;
-
   it('separates direct reports for two managers in one department', async () => {
     const first = await createManager('1');
     const second = await createManager('2');
@@ -793,7 +854,6 @@ describe('HR REST API', () => {
       .set(auth(first.token))
       .expect(403);
   });
-
   it('paginates request lists without duplicates and reuses profiles without resolving schedules', async () => {
     const manager = await createManager('1');
     const unrelated = await workflowRequest(manager.token);
@@ -803,12 +863,11 @@ describe('HR REST API', () => {
     for (let index = 0; index < 104; index++) {
       const id = randomUUID();
       ids.unshift(id);
-      db.prepare('INSERT INTO employee_requests VALUES (?, ?, ?, ?)').run(
-        id,
-        employee.id,
-        'pending',
-        JSON.stringify({ ...original, id }),
-      );
+      await db
+        .prepare(
+          'INSERT INTO employee_requests (id,employee_id,status,data) VALUES (?, ?, ?, ?)',
+        )
+        .run(id, employee.id, 'pending', JSON.stringify({ ...original, id }));
     }
     const profiles = vi.spyOn(app.get(EmployeesService), 'storedEmployee');
     const schedules = vi.spyOn(app.get(SchedulesService), 'assignedSchedule');
@@ -851,9 +910,11 @@ describe('HR REST API', () => {
         } while (before);
         expect(received).toEqual(expected);
       }
-      db.prepare(
-        "UPDATE employee_requests SET status = 'approved', data = json_set(data, '$.status', 'approved') WHERE id = ?",
-      ).run(original.id);
+      await db
+        .prepare(
+          "UPDATE employee_requests SET status = 'approved', data = jsonb_set(data::jsonb, '{status}', to_jsonb('approved'::text))::text WHERE id = ?",
+        )
+        .run(original.id);
       const approved = await request(server())
         .get('/api/requests/me?status=approved&limit=1')
         .set(auth(employeeToken))
@@ -883,7 +944,6 @@ describe('HR REST API', () => {
       schedules.mockRestore();
     }
   });
-
   it('only computes pending workflows for accessible direct reports', async () => {
     const manager = await createManager('1');
     const reportRequest = await workflowRequest();
@@ -918,7 +978,6 @@ describe('HR REST API', () => {
       workflow.mockRestore();
     }
   });
-
   it('requires manager review before HR, isolates permissions and routes notifications', async () => {
     const manager = await createManager('1');
     const created = await workflowRequest();
@@ -993,7 +1052,6 @@ describe('HR REST API', () => {
       ).body,
     ).toHaveLength(0);
   });
-
   it('limits manager scope, validates assignments, and sends own requests directly to HR', async () => {
     const manager = await createManager('1');
     const other = await createManager('2', 'Operations', 'manager', false);
@@ -1032,7 +1090,6 @@ describe('HR REST API', () => {
     await managerReview(own.id, manager.token).expect(403);
     await hrDecision(own.id).expect(200);
   });
-
   it('leaves manager rejection advisory and applies salary deductions only on HR decisions', async () => {
     const manager = await createManager('1');
     for (const [index, status] of ['approved', 'rejected'].entries()) {
@@ -1055,7 +1112,6 @@ describe('HR REST API', () => {
       );
     }
   });
-
   it('renews manager review after reassignment, reopening and employee department changes', async () => {
     const first = await createManager('1');
     const created = await workflowRequest();
@@ -1118,7 +1174,6 @@ describe('HR REST API', () => {
     await managerReview(created.id, operations.token).expect(200);
     await hrDecision(created.id).expect(200);
   });
-
   it('removes inactive manager assignments and separates manager and HR decisions', async () => {
     const manager = await createManager('1');
     const created = await workflowRequest();
@@ -1139,7 +1194,6 @@ describe('HR REST API', () => {
     ).toBeNull();
     await hrDecision(created.id).expect(200);
   });
-
   it('waits for final HR approval before applying a manager-reviewed forgotten check-out', async () => {
     const manager = await createManager('1');
     const record = (
@@ -1172,23 +1226,23 @@ describe('HR REST API', () => {
       .expect(200);
     expect(after.body.records[0].checkOut).toBe('2026-10-04T15:00:00.000Z');
   });
-
   it('rolls back manager review when its audit fails', async () => {
     const manager = await createManager('1');
     const created = await workflowRequest();
-    const actor = app.get(AuthService).authenticate(manager.token);
+    const actor = await app.get(AuthService).authenticate(manager.token);
     const audit = vi
       .spyOn(app.get(AuditService), 'record')
       .mockImplementationOnce(() => {
         throw new Error('Audit unavailable');
       });
     try {
-      expect(() =>
-        app.get(RequestsService).reviewRequest(actor, created.id, {
-          status: 'approved',
-          reason: 'Manager reviewed request',
-        }),
-      ).toThrow('Audit unavailable');
+      await expect(
+        (async () =>
+          await app.get(RequestsService).reviewRequest(actor, created.id, {
+            status: 'approved',
+            reason: 'Manager reviewed request',
+          }))(),
+      ).rejects.toThrow('Audit unavailable');
       const mine = await request(server())
         .get('/api/requests/me')
         .set(auth(employeeToken))
@@ -1202,7 +1256,6 @@ describe('HR REST API', () => {
       audit.mockRestore();
     }
   });
-
   it('notifies employees of decisions and keeps notification reads private and idempotent', async () => {
     await request(server()).get('/api/notifications').expect(401);
     const created = await request(server())
@@ -1323,7 +1376,6 @@ describe('HR REST API', () => {
       ).body.items,
     ).toHaveLength(0);
   });
-
   it('notifies rejected requests only to their employee and tracks HR reads independently', async () => {
     const other = (
       await request(server())
@@ -1338,6 +1390,7 @@ describe('HR REST API', () => {
         })
         .expect(201)
     ).body;
+    await grantHr(other.email);
     const otherToken = (
       await request(server())
         .post('/api/auth/login')
@@ -1395,7 +1448,6 @@ describe('HR REST API', () => {
       requestId: created.body.id,
     });
   });
-
   it('alerts HR only after shift end and resolves missing check-outs after correction', async () => {
     const record = (
       await submit('/api/attendance/check-in', employeeToken).expect(201)
@@ -1450,19 +1502,22 @@ describe('HR REST API', () => {
       ).body.items,
     ).toHaveLength(0);
   });
-
   it('uses the recorded overnight shift and timezone for missing check-out notifications', async () => {
     const db = app.get(DatabaseService).db;
     const id = '726d7b9b-3997-4b3a-b0ed-b20f5de20be3';
-    db.prepare('INSERT INTO attendance VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-      id,
-      employee.id,
-      '2026-10-03',
-      '2026-10-03T19:00:00Z',
-      null,
-      JSON.stringify({ ...schedule, start: '22:00', end: '06:00' }),
-      'Africa/Cairo',
-    );
+    await db
+      .prepare(
+        'INSERT INTO attendance (id,employee_id,work_date,check_in,check_out,schedule,timezone) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      )
+      .run(
+        id,
+        employee.id,
+        '2026-10-03',
+        '2026-10-03T19:00:00Z',
+        null,
+        JSON.stringify({ ...schedule, start: '22:00', end: '06:00' }),
+        'Africa/Cairo',
+      );
     vi.setSystemTime(new Date('2026-10-04T02:59:00Z'));
     expect(
       (
@@ -1482,12 +1537,11 @@ describe('HR REST API', () => {
       ).body.items[0],
     ).toMatchObject({ type: 'missing-check-out', attendanceId: id });
   });
-
   it('upgrades existing request storage without losing records', () => {
     const directory = mkdtempSync(join(tmpdir(), 'hr-request-migration-'));
     const path = join(directory, 'hr.sqlite');
     const previousPath = process.env.HR_DATABASE_PATH;
-    let upgraded: DatabaseService | undefined;
+    let upgraded: LegacySqliteStore | undefined;
     try {
       const legacy = new DatabaseSync(path);
       legacy.exec(
@@ -1514,7 +1568,7 @@ describe('HR REST API', () => {
         );
       legacy.close();
       process.env.HR_DATABASE_PATH = path;
-      upgraded = new DatabaseService();
+      upgraded = new LegacySqliteStore();
       expect(
         upgraded.db
           .prepare('SELECT status FROM employee_requests WHERE id = ?')
@@ -1537,7 +1591,6 @@ describe('HR REST API', () => {
       rmSync(directory, { recursive: true });
     }
   });
-
   it('rolls back withdrawal if recording its audit fails', async () => {
     const created = await request(server())
       .post('/api/requests')
@@ -1569,7 +1622,6 @@ describe('HR REST API', () => {
       audit.mockRestore();
     }
   });
-
   it('withdraws pending excuses, releases the allowance, and preserves an audit trail', async () => {
     const payload = {
       type: 'excuse',
@@ -1627,7 +1679,6 @@ describe('HR REST API', () => {
       ),
     ).toBe(true);
   });
-
   it('allows only HR to reopen an approval and removes its payroll and attendance effects', async () => {
     const created = await request(server())
       .post('/api/requests')
@@ -1696,13 +1747,17 @@ describe('HR REST API', () => {
       .expect(200);
     expect(
       audit.body.some(
-        (entry: { action: string; before: { salaryDeductionDays: number } }) =>
+        (entry: {
+          action: string;
+          before: {
+            salaryDeductionDays: number;
+          };
+        }) =>
           entry.action === 'request.reopened' &&
           entry.before.salaryDeductionDays === 1,
       ),
     ).toBe(true);
   });
-
   it('allows exactly 3 excuses totaling 4 hours and releases rejected reservations', async () => {
     const ids: string[] = [];
     for (const [index, excuseType] of [
@@ -1764,7 +1819,6 @@ describe('HR REST API', () => {
       .expect(200);
     expect(rows.body.length).toBe(4);
   });
-
   it('enforces the 240-minute cap even below 3 requests and counts every date', async () => {
     const payload = {
       type: 'excuse',
@@ -1810,7 +1864,6 @@ describe('HR REST API', () => {
       })
       .expect(201);
   });
-
   it('splits excuse minutes across calendar months and resets each monthly allowance', async () => {
     const payload = {
       type: 'excuse',
@@ -1856,7 +1909,6 @@ describe('HR REST API', () => {
       })
       .expect(201);
   });
-
   it('lists manual deductions by recording date in company timezone, with HR access only', async () => {
     vi.setSystemTime(new Date('2026-10-04T22:30:00Z'));
     adminToken = (
@@ -1871,7 +1923,6 @@ describe('HR REST API', () => {
         .send({ email: employee.email, password: employeePassword })
         .expect(201)
     ).body.token;
-
     const created = await request(server())
       .post('/api/payroll/deductions')
       .set(auth(adminToken))
@@ -1906,7 +1957,6 @@ describe('HR REST API', () => {
       .set(auth(employeeToken))
       .expect(403);
   });
-
   it('creates empty departments, rejects duplicates and assigns an existing employee later', async () => {
     await request(server())
       .post('/api/departments')
@@ -1941,17 +1991,12 @@ describe('HR REST API', () => {
       .set(auth(adminToken))
       .expect(200);
     expect(before.body[0].department).toBe('Engineering');
-    const store = app.get(DatabaseService);
-    store.db
-      .prepare('DELETE FROM departments WHERE name = ?')
-      .run('Engineering');
-    store.db.exec(DATABASE_SCHEMA);
+    // PostgreSQL keeps the catalog in persistent tables; SQLite backfills are covered by legacy upgrade tests.
     const migrated = await request(server())
       .get('/api/departments')
       .set(auth(adminToken))
       .expect(200);
     expect(migrated.body).toEqual(departments.body);
-
     const moved = await request(server())
       .patch(`/api/employees/${employee.id}`)
       .set(auth(adminToken))
@@ -1995,6 +2040,7 @@ describe('HR REST API', () => {
         password: employeePassword,
       })
       .expect(201);
+    await grantHr('hr@test.local');
     const hr = await request(server())
       .post('/api/auth/login')
       .send({ email: 'hr@test.local', password: employeePassword })
@@ -2009,7 +2055,6 @@ describe('HR REST API', () => {
       .set(auth(hr.body.token))
       .expect(200);
   });
-
   it.each(['sick', 'unpaid', 'urgent', 'mission'])(
     'submits and approves %s requests with the shared salary deduction policy',
     async (type) => {
@@ -2036,7 +2081,6 @@ describe('HR REST API', () => {
       expect(report.body[0].status).toBe(`Approved ${type}`);
     },
   );
-
   it('persists excuse details and attachments without turning a partial excuse into full-day leave', async () => {
     const payload = {
       type: 'excuse',
@@ -2085,7 +2129,6 @@ describe('HR REST API', () => {
       .expect(200);
     expect(report.body[0].status).toBe('No record');
   });
-
   it('rejects invalid excuse fields, dates, durations and attachments', async () => {
     const payload = {
       type: 'excuse',
@@ -2117,7 +2160,6 @@ describe('HR REST API', () => {
         .expect(400);
     }
   });
-
   beforeAll(async () => {
     photo = await sharp({
       create: { width: 64, height: 64, channels: 3, background: '#779988' },
@@ -2179,7 +2221,6 @@ describe('HR REST API', () => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
   });
-
   it('keeps future assignments out of current attendance and preserves missing-day expectations', async () => {
     const next = (
       await request(server())
@@ -2250,7 +2291,6 @@ describe('HR REST API', () => {
     const record = await submit('/api/attendance/check-in', token).expect(201);
     expect(record.body.schedule.id).toBe(next.id);
   });
-
   it('versions shared schedule edits and uses the old definition for historical manual entries', async () => {
     const record = await submit(
       '/api/attendance/check-in',
@@ -2290,7 +2330,6 @@ describe('HR REST API', () => {
       .expect(201);
     expect(manual.body.schedule).toEqual(schedule);
   });
-
   it('rejects backdated and pre-employment assignments and rolls back assignment writes with audit failure', async () => {
     await request(server())
       .patch(`/api/employees/${employee.id}`)
@@ -2319,7 +2358,6 @@ describe('HR REST API', () => {
       .expect(200);
     expect(history.body).toHaveLength(1);
   });
-
   it('uses the previous workday schedule for overnight attendance across an assignment change', async () => {
     await request(server())
       .patch(`/api/schedules/${schedule.id}`)
@@ -2364,7 +2402,6 @@ describe('HR REST API', () => {
     expect(record.body.workDate).toBe('2026-10-04');
     expect(record.body.schedule.start).toBe('22:00');
   });
-
   it('validates Excuse shifts against each requested date', async () => {
     const sales = (
       await request(server())
@@ -2400,7 +2437,6 @@ describe('HR REST API', () => {
       .send({ ...excuse, from: '2026-10-04', shiftId: schedule.id })
       .expect(400);
   });
-
   it('generates sequential employee numbers and preserves them on edits', async () => {
     expect(employee.employeeNumber).toBe('EMP-000001');
     const second = await request(server())
@@ -2426,7 +2462,6 @@ describe('HR REST API', () => {
       .send({ ...fields(), employeeNumber: 'EMP-999999' })
       .expect(400);
   });
-
   it('calculates monthly payroll with vacation deductions once per decision', async () => {
     await request(server())
       .patch(`/api/employees/${employee.id}`)
@@ -2483,7 +2518,6 @@ describe('HR REST API', () => {
       netSalary: 3000.01,
     });
   });
-
   it('uses the company decision month and rounds the total deduction once', async () => {
     await request(server())
       .patch(`/api/employees/${employee.id}`)
@@ -2528,7 +2562,6 @@ describe('HR REST API', () => {
       netSalary: 900,
     });
   });
-
   it('lets HR record manual deductions with reasons and approvers alongside vacation deductions', async () => {
     await request(server())
       .patch(`/api/employees/${employee.id}`)
@@ -2547,6 +2580,7 @@ describe('HR REST API', () => {
         password: employeePassword,
       })
       .expect(201);
+    await grantHr('payroll-hr@test.local');
     const hrToken = (
       await request(server())
         .post('/api/auth/login')
@@ -2620,7 +2654,6 @@ describe('HR REST API', () => {
       after: { approvedBy: 'Operations Director' },
     });
   });
-
   it('requires valid deduction details and prevents employee access', async () => {
     const body = {
       employeeId: employee.id,
@@ -2664,47 +2697,47 @@ describe('HR REST API', () => {
       .send({ ...body, employeeId: '00000000-0000-4000-8000-000000000001' })
       .expect(404);
     expect(
-      app
+      (await app
         .get(DatabaseService)
         .db.prepare('SELECT COUNT(*) AS count FROM payroll_deductions')
-        .get()!.count,
+        .get())!.count,
     ).toBe(0);
   });
-
-  it('rolls back a manual deduction if its audit cannot be recorded', () => {
-    const actor = app
+  it('rolls back a manual deduction if its audit cannot be recorded', async () => {
+    const actor = (await app
       .get(DatabaseService)
       .db.prepare('SELECT id FROM users WHERE email = ?')
-      .get('admin@test.local')!;
+      .get('admin@test.local'))!;
     vi.spyOn(app.get(AuditService), 'record').mockImplementationOnce(() => {
       throw new Error('Audit failed');
     });
-    expect(() =>
-      app.get(PayrollService).addDeduction(
-        {
-          id: actor.id as string,
-          name: 'Company Administrator',
-          email: 'admin@test.local',
-          role: 'admin',
-          employeeId: null,
-        },
-        {
-          employeeId: employee.id,
-          month: '2026-10',
-          days: 1,
-          reason: 'Unexcused absence',
-          approvedBy: 'Department Manager',
-        },
-      ),
-    ).toThrow('Audit failed');
+    await expect(
+      (async () =>
+        await app.get(PayrollService).addDeduction(
+          {
+            companyId: testCompanyId,
+            id: actor.id as string,
+            name: 'Company Administrator',
+            email: 'admin@test.local',
+            role: 'admin',
+            employeeId: null,
+          },
+          {
+            employeeId: employee.id,
+            month: '2026-10',
+            days: 1,
+            reason: 'Unexcused absence',
+            approvedBy: 'Department Manager',
+          },
+        ))(),
+    ).rejects.toThrow('Audit failed');
     expect(
-      app
+      (await app
         .get(DatabaseService)
         .db.prepare('SELECT COUNT(*) AS count FROM payroll_deductions')
-        .get()!.count,
+        .get())!.count,
     ).toBe(0);
   });
-
   it('protects payroll access and validates salary and month inputs', async () => {
     await request(server()).get('/api/payroll?month=2026-10').expect(401);
     await request(server())
@@ -2749,7 +2782,6 @@ describe('HR REST API', () => {
       .expect(200);
     expect(earlier.body).toHaveLength(0);
   });
-
   it('preserves national IDs as strings and rejects missing or duplicate IDs', async () => {
     expect(employee.nationalId).toBe('00123456789012');
     const response = await request(server())
@@ -2777,7 +2809,6 @@ describe('HR REST API', () => {
       })
       .expect(400);
   });
-
   it('submits private time-off requests and applies only approved requests to reports', async () => {
     const result = await request(server())
       .post('/api/requests')
@@ -2846,7 +2877,6 @@ describe('HR REST API', () => {
       'request.approved',
     );
   });
-
   it('deducts three salary days per rejected vacation and prevents repeated deductions', async () => {
     const pending = await request(server())
       .post('/api/requests')
@@ -2896,7 +2926,6 @@ describe('HR REST API', () => {
     ).toHaveLength(1);
     expect(audit.body[0].after.salaryDeductionDays).toBe(3);
   });
-
   it('rejects overlaps and malformed requests, and allows resubmission after rejection', async () => {
     const body = {
       type: 'holiday',
@@ -2945,7 +2974,6 @@ describe('HR REST API', () => {
       .expect(200);
     expect(report.body[0].status).toBe('No record');
   });
-
   it('approves forgotten check-outs atomically with the attendance correction audit', async () => {
     const record = (
       await submit('/api/attendance/check-in', employeeToken).expect(201)
@@ -3013,7 +3041,6 @@ describe('HR REST API', () => {
       .expect(200);
     expect(evidence.body).toHaveLength(1);
   });
-
   it('leaves a stale correction request pending if attendance was already closed', async () => {
     const record = (
       await submit('/api/attendance/check-in', employeeToken).expect(201)
@@ -3046,13 +3073,13 @@ describe('HR REST API', () => {
       .expect(200);
     expect(mine.body[0].status).toBe('pending');
   });
-
   it('prevents HR deciding their own request and isolates employee request histories', async () => {
     await request(server())
       .patch(`/api/employees/${employee.id}`)
       .set(auth(adminToken))
       .send({ ...fields(), role: 'hr' })
       .expect(200);
+    await grantHr(employee.email);
     const hrToken = (
       await request(server())
         .post('/api/auth/login')
@@ -3114,7 +3141,6 @@ describe('HR REST API', () => {
       })
       .expect(404);
   });
-
   it('shows approved holidays without overriding recorded attendance or extending to weekends', async () => {
     const pending = (
       await request(server())
@@ -3160,7 +3186,6 @@ describe('HR REST API', () => {
       })
       .expect(409);
   });
-
   it('rolls back request and attendance together if the decision audit fails', async () => {
     const record = (
       await submit('/api/attendance/check-in', employeeToken).expect(201)
@@ -3178,46 +3203,65 @@ describe('HR REST API', () => {
         })
         .expect(201)
     ).body;
-    app.get(DatabaseService).db
-      .exec(`CREATE TEMP TRIGGER fail_decision_audit BEFORE INSERT ON audit
-      WHEN NEW.action = 'request.approved' BEGIN SELECT RAISE(ABORT, 'Audit failed'); END;`);
-    const authService = app.get(AuthService);
-    const auditBefore = app
+    const recordAudit = app
       .get(AuditService)
-      .auditHistory(authService.authenticate(adminToken), record.id);
-    expect(() =>
-      app
-        .get(RequestsService)
-        .decideRequest(authService.authenticate(adminToken), pending.id, {
-          status: 'approved',
-          reason: 'Departure confirmed by HR',
-        }),
-    ).toThrow('Audit failed');
+      .record.bind(app.get(AuditService));
+    vi.spyOn(app.get(AuditService), 'record').mockImplementation(
+      async (...args) => {
+        if (args[1] === 'request.approved') throw new Error('Audit failed');
+        return recordAudit(...args);
+      },
+    );
+    const authService = app.get(AuthService);
+    const auditBefore = await app
+      .get(AuditService)
+      .auditHistory(await authService.authenticate(adminToken), record.id);
+    await expect(
+      (async () =>
+        await app
+          .get(RequestsService)
+          .decideRequest(
+            await authService.authenticate(adminToken),
+            pending.id,
+            {
+              status: 'approved',
+              reason: 'Departure confirmed by HR',
+            },
+          ))(),
+    ).rejects.toThrow('Audit failed');
     expect(
-      app
-        .get(RequestsService)
-        .requests(authService.authenticate(employeeToken), true)[0].status,
+      (
+        await app
+          .get(RequestsService)
+          .requests(await authService.authenticate(employeeToken), true)
+      )[0].status,
     ).toBe('pending');
     expect(
-      app
-        .get(AttendanceService)
-        .myAttendance(authService.authenticate(employeeToken)).records[0]
-        .checkOut,
+      (
+        await app
+          .get(AttendanceService)
+          .myAttendance(await authService.authenticate(employeeToken))
+      ).records[0].checkOut,
     ).toBeNull();
     expect(
-      app
+      await app
         .get(AuditService)
-        .auditHistory(authService.authenticate(adminToken), record.id),
+        .auditHistory(await authService.authenticate(adminToken), record.id),
     ).toEqual(auditBefore);
   });
-
   it('requires authentication, isolates employee access, and permits cookie sessions', async () => {
-    const directory = await request(server()).get('/api/employees').set(auth(adminToken)).expect(200);
-    const linked = directory.body.find((row: { id: string }) => row.id === employee.id);
-    expect(linked.accountId).toBe(app.get(AuthService).authenticate(employeeToken).id);
+    const directory = await request(server())
+      .get('/api/employees')
+      .set(auth(adminToken))
+      .expect(200);
+    const linked = directory.body.find(
+      (row: { id: string }) => row.id === employee.id,
+    );
+    expect(linked.accountId).toBe(
+      (await app.get(AuthService).authenticate(employeeToken)).id,
+    );
     expect(linked.accountId).not.toBe(employee.id);
     expect(linked).not.toHaveProperty('password_hash');
-
     await request(server()).get('/api/health').expect(200, { status: 'ok' });
     for (const route of [
       '/api/schedules',
@@ -3257,29 +3301,31 @@ describe('HR REST API', () => {
     await agent.post('/api/auth/logout').expect(201);
     await agent.get('/api/auth/me').expect(401);
   });
-
   it('rejects a login if credentials change during password verification', async () => {
     const authService = app.get(AuthService);
     const db = app.get(DatabaseService).db;
-    const user = db
+    const user = (await db
       .prepare('SELECT id FROM users WHERE employee_id = ?')
-      .get(employee.id)!;
-    const before = db
+      .get(employee.id))!;
+    const before = (await db
       .prepare('SELECT COUNT(*) AS total FROM sessions WHERE user_id = ?')
-      .get(user.id)!;
+      .get(user.id))!;
     const pending = authService.login(employee.email, employeePassword);
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(
-      `${'0'.repeat(32)}:${'0'.repeat(128)}`,
-      user.id,
+    const rejected = expect(pending).rejects.toThrow(
+      'Invalid email or password',
     );
-    await expect(pending).rejects.toThrow('Invalid email or password');
+    await db
+      .prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+      .run(`${'0'.repeat(32)}:${'0'.repeat(128)}`, user.id);
+    await rejected;
     expect(
-      db
-        .prepare('SELECT COUNT(*) AS total FROM sessions WHERE user_id = ?')
-        .get(user.id)?.total,
+      (
+        await db
+          .prepare('SELECT COUNT(*) AS total FROM sessions WHERE user_id = ?')
+          .get(user.id)
+      )?.total,
     ).toBe(before.total);
   });
-
   it('blocks untrusted browser origins, even on login', async () => {
     await request(server())
       .post('/api/auth/login')
@@ -3290,7 +3336,6 @@ describe('HR REST API', () => {
       .set('Sec-Fetch-Site', 'cross-site')
       .expect(403);
   });
-
   it('records server time and makes concurrent check-in/check-out retries idempotent', async () => {
     const responses = await Promise.all([
       submit('/api/attendance/check-in', employeeToken),
@@ -3323,7 +3368,6 @@ describe('HR REST API', () => {
     ).toBe(id);
     await submit(`/api/attendance/${id}/check-out`, adminToken).expect(400);
   });
-
   it('requires location and photo evidence for both employee events', async () => {
     await request(server())
       .post('/api/attendance/check-in')
@@ -3358,7 +3402,6 @@ describe('HR REST API', () => {
       ).body.records[0].checkOut,
     ).toBeNull();
   });
-
   it('rejects outside-office events and rejects stale, future, inaccurate, or invalid positions', async () => {
     await submit('/api/attendance/check-in', employeeToken, {
       latitude: '30.025092',
@@ -3392,7 +3435,6 @@ describe('HR REST API', () => {
       ).body.records[0].checkOut,
     ).toBeNull();
   });
-
   it('limits photo uploads and rejects duplicate photo fields', async () => {
     await submit(
       '/api/attendance/check-in',
@@ -3411,7 +3453,6 @@ describe('HR REST API', () => {
       ).body.records,
     ).toHaveLength(0);
   });
-
   it('stores private, normalized photos and keeps the original evidence on retries', async () => {
     const landscape = await sharp({
       create: { width: 1920, height: 1080, channels: 3, background: '#0000ff' },
@@ -3467,9 +3508,12 @@ describe('HR REST API', () => {
         .expect(200)
     ).body;
     expect(evidence).toHaveLength(2);
-    const attendanceAudit = app
+    const attendanceAudit = await app
       .get(AuditService)
-      .auditHistory(app.get(AuthService).authenticate(adminToken), record.id);
+      .auditHistory(
+        await app.get(AuthService).authenticate(adminToken),
+        record.id,
+      );
     expect(attendanceAudit.map((entry) => entry.action)).toEqual([
       'attendance.checked_out',
       'attendance.checked_in',
@@ -3484,34 +3528,37 @@ describe('HR REST API', () => {
       .set(auth(adminToken))
       .expect(200);
   });
-
-  it('rolls attendance back if evidence cannot be committed', () => {
+  it('rolls attendance back if evidence cannot be committed', async () => {
     const authService = app.get(AuthService);
     const db = app.get(DatabaseService).db;
     vi.spyOn(app.get(AttendanceEvidence), 'save').mockImplementationOnce(() => {
       throw new Error('Storage failure');
     });
-    expect(() =>
-      app
-        .get(AttendanceService)
-        .checkIn(authService.authenticate(employeeToken), {
-          latitude: 30.023092,
-          longitude: 31.528179,
-          accuracyMeters: 10,
-          capturedAt: new Date().toISOString(),
-          distanceMeters: 0,
-          photo,
-        }),
-    ).toThrow('Storage failure');
+    await expect(
+      (async () =>
+        await app
+          .get(AttendanceService)
+          .checkIn(await authService.authenticate(employeeToken), {
+            latitude: 30.023092,
+            longitude: 31.528179,
+            accuracyMeters: 10,
+            capturedAt: new Date().toISOString(),
+            distanceMeters: 0,
+            photo,
+          }))(),
+    ).rejects.toThrow('Storage failure');
     expect(
-      db.prepare('SELECT COUNT(*) AS count FROM attendance').get()?.count,
-    ).toBe(0);
-    expect(
-      db.prepare('SELECT COUNT(*) AS count FROM attendance_evidence').get()
+      (await db.prepare('SELECT COUNT(*) AS count FROM attendance').get())
         ?.count,
     ).toBe(0);
+    expect(
+      (
+        await db
+          .prepare('SELECT COUNT(*) AS count FROM attendance_evidence')
+          .get()
+      )?.count,
+    ).toBe(0);
   });
-
   it('does not allow another employee to close a record', async () => {
     const record = (await submit('/api/attendance/check-in', employeeToken))
       .body;
@@ -3547,7 +3594,6 @@ describe('HR REST API', () => {
     ).body.records;
     expect(mine).toHaveLength(0);
   });
-
   it('keeps history after deactivation and revokes existing sessions', async () => {
     await submit('/api/attendance/check-in', employeeToken).expect(201);
     await request(server())
@@ -3571,7 +3617,6 @@ describe('HR REST API', () => {
       ).body,
     ).toHaveLength(1);
   });
-
   it('validates unique accounts, passwords, dates, and unknown fields', async () => {
     await request(server())
       .post('/api/employees')
@@ -3603,7 +3648,6 @@ describe('HR REST API', () => {
       .set(auth(adminToken))
       .expect(400);
   });
-
   it('snapshots schedules and audits corrections with the original values', async () => {
     const record = (await submit('/api/attendance/check-in', employeeToken))
       .body;
@@ -3660,19 +3704,14 @@ describe('HR REST API', () => {
       })
       .expect(400);
   });
-
   it.each(['withdrawn', 'rejected', 'approved'])(
     'allows a new workday with a pending forgotten check-out, then handles %s',
     async (status) => {
       const db = app.get(DatabaseService).db;
-      db.exec(
-        'CREATE UNIQUE INDEX one_open_interval ON attendance(employee_id) WHERE check_out IS NULL',
-      );
-      db.exec(DATABASE_SCHEMA);
       expect(
-        db
+        await db
           .prepare(
-            "SELECT name FROM sqlite_master WHERE name = 'one_open_interval'",
+            "SELECT indexname AS name FROM pg_indexes WHERE schemaname='public' AND indexname='one_open_interval'",
           )
           .get(),
       ).toBeUndefined();
@@ -3758,7 +3797,6 @@ describe('HR REST API', () => {
       );
     },
   );
-
   it('flags missing check-outs and prevents a second open workday', async () => {
     await submit('/api/attendance/check-in', employeeToken).expect(201);
     vi.setSystemTime(new Date('2026-10-04T15:00:00Z'));
@@ -3777,7 +3815,6 @@ describe('HR REST API', () => {
     ).body.token;
     await submit('/api/attendance/check-in', employeeToken).expect(409);
   });
-
   it('filters reports and exports matching rows without spreadsheet formulas', async () => {
     await request(server())
       .patch(`/api/employees/${employee.id}`)
@@ -3808,7 +3845,6 @@ describe('HR REST API', () => {
     expect(csv.text).toContain('National ID');
     expect(csv.text).toContain('00123456789012');
   });
-
   it('limits failed logins and expires sessions', async () => {
     for (let i = 0; i < 5; i++)
       await request(server())
@@ -3825,7 +3861,6 @@ describe('HR REST API', () => {
       .set(auth(employeeToken))
       .expect(401);
   });
-
   it('allows only HR to enter missing attendance, validates times, and audits the reason', async () => {
     const input = {
       employeeId: employee.id,
@@ -3862,7 +3897,6 @@ describe('HR REST API', () => {
     expect(audit[0].action).toBe('attendance.manual_entry');
     expect(audit[0].reason).toBe(input.reason);
   });
-
   it('revokes all sessions when a user changes their password', async () => {
     await request(server())
       .post('/api/auth/password')
@@ -3885,7 +3919,6 @@ describe('HR REST API', () => {
       .send({ email: employee.email, password: 'New-test-password-2026' })
       .expect(201);
   });
-
   it('allows HR to manage employees but reserves privileged accounts and schedules for admins', async () => {
     const hr = (
       await request(server())
@@ -3900,6 +3933,7 @@ describe('HR REST API', () => {
         })
         .expect(201)
     ).body;
+    await grantHr(hr.email);
     const token = (
       await request(server())
         .post('/api/auth/login')

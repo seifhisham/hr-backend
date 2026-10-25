@@ -9,7 +9,7 @@ import type { ApprovePayrollDto } from './dto/approval.dto.js';
 import type { PayrollRun, PayrollRow } from './types/payroll-run.type.js';
 import { requireUnlockedPayroll } from './payroll-lock.js';
 import { AuditService } from '../audit/audit.service.js';
-import { requireHr } from '../common/security/permissions.js';
+import { requireHr, requireAdmin } from '../common/security/permissions.js';
 import { DatabaseService } from '../database/database.service.js';
 import type { AddDeductionDto, PayrollDeduction } from './dto/deduction.dto.js';
 import { localTime } from '../attendance/attendance-time.js';
@@ -17,22 +17,34 @@ import { CompanyService } from '../company/company.service.js';
 import type { Actor } from '../common/types/actor.type.js';
 import { EmployeesService } from '../employees/employees.service.js';
 import type { EmployeeRequest } from '../requests/types/employee-request.type.js';
-
 @Injectable()
 export class PayrollService {
   constructor(
     @Inject(EmployeesService)
     private readonly employeesService: EmployeesService,
-    @Inject(CompanyService) private readonly companyService: CompanyService,
-    @Inject(DatabaseService) private readonly store: DatabaseService,
-    @Inject(AuditService) private readonly auditService: AuditService,
+    @Inject(CompanyService)
+    private readonly companyService: CompanyService,
+    @Inject(DatabaseService)
+    private readonly store: DatabaseService,
+    @Inject(AuditService)
+    private readonly auditService: AuditService,
   ) {}
-
-  addDeduction(actor: Actor, input: AddDeductionDto) {
+  async addDeduction(actor: Actor, input: AddDeductionDto) {
     requireHr(actor);
-    return this.store.transaction(() => {
-      requireUnlockedPayroll(this.store.db, input.month);
-      const employee = this.employeesService.employee(input.employeeId);
+    return await this.store.transaction(async () => {
+      await requireUnlockedPayroll(this.store.db, input.month);
+      const visible = await this.store
+        .prepare('SELECT hr_month_visible(?,?) AS allowed')
+        .get(input.employeeId, input.month);
+      if (!visible?.allowed)
+        throw new BadRequestException(
+          'Payroll spans branches outside your access',
+        );
+      const employee = await this.employeesService.historicalEmployee(
+        actor,
+        input.employeeId,
+        input.month + '-01',
+      );
       if (input.month < employee.startDate.slice(0, 7))
         throw new BadRequestException(
           'Deduction month cannot be before employment',
@@ -44,7 +56,7 @@ export class PayrollService {
         recordedBy: actor.name,
         recordedById: actor.id,
       };
-      this.store.db
+      await this.store.db
         .prepare(
           'INSERT INTO payroll_deductions (id, employee_id, month, data) VALUES (?, ?, ?, ?)',
         )
@@ -54,7 +66,7 @@ export class PayrollService {
           deduction.month,
           JSON.stringify(deduction),
         );
-      this.auditService.record(
+      await this.auditService.record(
         actor,
         'payroll.deduction.created',
         deduction.id,
@@ -65,36 +77,45 @@ export class PayrollService {
       return deduction;
     });
   }
-
-  deductions(
+  async deductions(
     actor: Actor,
-    range: { from: string; to: string },
-  ): PayrollDeduction[] {
+    range: {
+      from: string;
+      to: string;
+    },
+  ): Promise<PayrollDeduction[]> {
     requireHr(actor);
-    const timezone = this.companyService.settings().timezone;
-    return this.store.db
-      .prepare('SELECT data FROM payroll_deductions ORDER BY rowid DESC')
-      .all()
+    const timezone = (await this.companyService.settings()).timezone;
+    return (
+      await this.store.db
+        .prepare('SELECT data FROM payroll_deductions ORDER BY row_order DESC')
+        .all()
+    )
       .map((row) => JSON.parse(row.data as string) as PayrollDeduction)
       .filter((deduction) => {
         const date = localTime(new Date(deduction.recordedAt), timezone).date;
         return date >= range.from && date <= range.to;
       });
   }
-
-  private approvedRun(month: string): PayrollRun | null {
-    const row = this.store.db
-      .prepare('SELECT data FROM payroll_runs WHERE month = ?')
+  private async approvedRun(
+    month: string,
+    actor?: Actor,
+  ): Promise<PayrollRun | null> {
+    const row = await this.store.db
+      .prepare(
+        actor?.role === 'hr'
+          ? 'SELECT hr_payroll_run(?) AS data'
+          : 'SELECT data FROM payroll_runs WHERE month = ?',
+      )
       .get(month);
-    return row ? (JSON.parse(row.data as string) as PayrollRun) : null;
+    return row?.data ? (JSON.parse(row.data as string) as PayrollRun) : null;
   }
-
-  run(actor: Actor, month: string): PayrollRun {
+  async run(actor: Actor, month: string): Promise<PayrollRun> {
     requireHr(actor);
-    const approved = this.approvedRun(month);
+    const approved = await this.approvedRun(month, actor);
     if (approved) return approved;
-    const { name: company, timezone } = this.companyService.settings();
-    const rows = this.calculate(actor, month);
+    const { name: company, timezone } = await this.companyService.settings();
+    const rows = await this.calculate(actor, month);
     const revision = createHash('sha256')
       .update(JSON.stringify({ month, company, timezone, rows }))
       .digest('hex');
@@ -111,12 +132,11 @@ export class PayrollService {
       rows,
     };
   }
-
-  approve(actor: Actor, input: ApprovePayrollDto): PayrollRun {
-    requireHr(actor);
-    return this.store.transaction(() => {
-      requireUnlockedPayroll(this.store.db, input.month);
-      const draft = this.run(actor, input.month);
+  async approve(actor: Actor, input: ApprovePayrollDto): Promise<PayrollRun> {
+    requireAdmin(actor);
+    return await this.store.transaction(async () => {
+      await requireUnlockedPayroll(this.store.db, input.month);
+      const draft = await this.run(actor, input.month);
       if (input.month > localTime(new Date(), draft.timezone).date.slice(0, 7))
         throw new BadRequestException(
           'Future payroll months cannot be approved',
@@ -140,10 +160,10 @@ export class PayrollService {
         approvedById: actor.id,
         approvalReason: input.reason,
       };
-      this.store.db
-        .prepare('INSERT INTO payroll_runs VALUES (?, ?)')
+      await this.store.db
+        .prepare('INSERT INTO payroll_runs (month,data) VALUES (?, ?)')
         .run(input.month, JSON.stringify(approved));
-      this.auditService.record(
+      await this.auditService.record(
         actor,
         'payroll.approved',
         input.month,
@@ -154,27 +174,51 @@ export class PayrollService {
       return approved;
     });
   }
-
-  preview(actor: Actor, month: string): PayrollRow[] {
+  async preview(actor: Actor, month: string): Promise<PayrollRow[]> {
     requireHr(actor);
-    return this.approvedRun(month)?.rows ?? this.calculate(actor, month);
+    return (
+      (await this.approvedRun(month, actor))?.rows ??
+      (await this.calculate(actor, month))
+    );
   }
-
-  private calculate(actor: Actor, month: string): PayrollRow[] {
-    const employees = this.employeesService.employees(actor);
-    const requests = this.store.db
-      .prepare(
-        "SELECT data FROM employee_requests WHERE status != 'pending' AND json_extract(data, '$.salaryDeductionDays') IS NOT NULL ORDER BY rowid DESC",
-      )
-      .all()
-      .map((row) => JSON.parse(row.data as string) as EmployeeRequest);
-    const { timezone } = this.companyService.settings();
-    const manual = this.store.db
-      .prepare(
-        'SELECT data FROM payroll_deductions WHERE month = ? ORDER BY rowid DESC',
-      )
-      .all(month)
-      .map((row) => JSON.parse(row.data as string) as PayrollDeduction);
+  private async calculate(actor: Actor, month: string): Promise<PayrollRow[]> {
+    const candidates =
+      actor.role === 'hr'
+        ? (
+            await this.employeesService.historicalScope(
+              actor,
+              month + '-01',
+              month + '-31',
+            )
+          ).employees
+        : await this.employeesService.employees(actor);
+    const visible = new Set(
+      (
+        await this.store
+          .prepare(
+            'SELECT employee_id FROM employee_branches WHERE hr_month_visible(employee_id,?)',
+          )
+          .all(month)
+      ).map((row) => row.employee_id),
+    );
+    const employees = candidates.filter(
+      (employee) => actor.role !== 'hr' || visible.has(employee.id),
+    );
+    const requests = (
+      await this.store.db
+        .prepare(
+          "SELECT data FROM employee_requests WHERE status != 'pending' AND (data::jsonb->>'salaryDeductionDays') IS NOT NULL ORDER BY row_order DESC",
+        )
+        .all()
+    ).map((row) => JSON.parse(row.data as string) as EmployeeRequest);
+    const { timezone } = await this.companyService.settings();
+    const manual = (
+      await this.store.db
+        .prepare(
+          'SELECT data FROM payroll_deductions WHERE month = ? ORDER BY row_order DESC',
+        )
+        .all(month)
+    ).map((row) => JSON.parse(row.data as string) as PayrollDeduction);
     const requestsByEmployee = new Map<string, EmployeeRequest[]>();
     for (const request of requests) {
       if (

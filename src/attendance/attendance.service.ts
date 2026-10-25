@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  HttpException,
   ConflictException,
   ForbiddenException,
   Inject,
@@ -34,76 +35,130 @@ import type {
   ManualAttendanceDto,
 } from './dto/attendance.dto.js';
 import type { Attendance, ReportRow } from './types/attendance.type.js';
-
 @Injectable()
 export class AttendanceService {
+  private readonly pendingReports = new Map<string, number>();
   private reportQueue: Promise<void> = Promise.resolve();
   constructor(
-    @Inject(DatabaseService) private readonly store: DatabaseService,
-    @Inject(AttendanceEvidence) private readonly evidence: AttendanceEvidence,
+    @Inject(DatabaseService)
+    private readonly store: DatabaseService,
+    @Inject(AttendanceEvidence)
+    private readonly evidence: AttendanceEvidence,
     @Inject(EmployeesService)
     private readonly employeesService: EmployeesService,
     @Inject(SchedulesService)
     private readonly schedulesService: SchedulesService,
-    @Inject(CompanyService) private readonly companyService: CompanyService,
-    @Inject(AuditService) private readonly auditService: AuditService,
+    @Inject(CompanyService)
+    private readonly companyService: CompanyService,
+    @Inject(AuditService)
+    private readonly auditService: AuditService,
     @Inject(AttendanceLocationService)
     private readonly location: AttendanceLocationService,
   ) {}
   private get db() {
     return this.store.db;
   }
-
-  myAttendance(actor: Actor) {
-    const employee = this.employeesService.employeeActor(actor);
-    this.location.sweep();
-    const current = this.schedulesService.currentWorkday(employee.id);
-    const records = this.db
+  async policy(actor: Actor, id?: string) {
+    const company = await this.companyService.settings();
+    if (!actor.employeeId) return company;
+    const workday = await this.schedulesService.currentWorkday(
+      actor.employeeId,
+    );
+    const record = id
+      ? await this.db
+          .prepare(
+            'SELECT branch_snapshot FROM attendance WHERE id=? AND employee_id=?',
+          )
+          .get(id, actor.employeeId)
+      : await this.db
+          .prepare(
+            'SELECT branch_snapshot FROM attendance WHERE employee_id=? AND work_date=?',
+          )
+          .get(actor.employeeId, workday.date);
+    if (id && !record)
+      throw new NotFoundException('Attendance record not found');
+    if (record) {
+      const snapshot = JSON.parse(record.branch_snapshot as string) as {
+        id: string;
+        name: string;
+        policy: typeof company;
+      };
+      return {
+        ...company,
+        ...snapshot.policy,
+        name: company.name,
+        timezone: company.timezone,
+        branchId: snapshot.id,
+        branchName: snapshot.name,
+      };
+    }
+    const branch = await this.db
+      .prepare(
+        'SELECT id,name,policy FROM branches WHERE id=hr_branch_at(?,?) AND active',
+      )
+      .get(actor.employeeId, workday.date);
+    if (!branch)
+      throw new BadRequestException('An active assigned branch is required');
+    return {
+      ...company,
+      ...(JSON.parse(branch.policy as string) as typeof company),
+      name: company.name,
+      timezone: company.timezone,
+      branchId: branch.id as string,
+      branchName: branch.name as string,
+    };
+  }
+  async myAttendance(actor: Actor) {
+    const employee = await this.employeesService.employeeActor(actor);
+    await this.location.sweep();
+    const current = await this.schedulesService.currentWorkday(employee.id);
+    const records = (await this.db
       .prepare(
         'SELECT * FROM attendance WHERE employee_id = ? ORDER BY work_date DESC LIMIT 93',
       )
-      .all(employee.id) as AttendanceRow[];
+      .all(employee.id)) as AttendanceRow[];
     return {
       employee,
       schedule: current.schedule,
       workDate: current.date,
-      records: records.map((r) => ({
-        ...attendance(r),
-        status: attendanceStatus(attendance(r), new Date()),
-        location: this.location.view(r.id),
-      })),
+      records: await Promise.all(
+        records.map(async (r) => ({
+          ...attendance(r),
+          status: attendanceStatus(attendance(r), new Date()),
+          location: await this.location.view(r.id),
+        })),
+      ),
     };
   }
-
-  checkIn(actor: Actor, evidence: Evidence) {
-    const employee = this.employeesService.employeeActor(actor);
+  async checkIn(actor: Actor, evidence: Evidence) {
+    const employee = await this.employeesService.employeeActor(actor);
     if (!employee.active) throw new ForbiddenException('Employee is inactive');
-    return this.store.transaction(() => {
-      const { schedule, date } = this.schedulesService.currentWorkday(
+    return await this.store.transaction(async () => {
+      const { schedule, date } = await this.schedulesService.currentWorkday(
         employee.id,
       );
-      const timezone = this.companyService.settings().timezone;
+      const timezone = (await this.companyService.settings()).timezone;
       const now = new Date();
       if (employee.startDate > date)
         throw new BadRequestException(
           'Attendance cannot start before employment begins',
         );
-      const existing = this.db
+      const existing = (await this.db
         .prepare(
           'SELECT * FROM attendance WHERE employee_id = ? AND work_date = ?',
         )
-        .get(employee.id, date) as AttendanceRow | undefined;
+        .get(employee.id, date)) as AttendanceRow | undefined;
       if (existing) return attendance(existing);
       if (
-        this.db
+        await this.db
           .prepare(
             `SELECT a.id FROM attendance a
              WHERE a.employee_id = ? AND a.check_out IS NULL
                AND (a.work_date >= ? OR NOT EXISTS (
                  SELECT 1 FROM employee_requests r
                  WHERE r.employee_id = a.employee_id AND r.status = 'pending'
-                   AND json_extract(r.data, '$.type') = 'forgotten-check-out'
-                   AND json_extract(r.data, '$.attendanceId') = a.id
+                   AND (r.data::jsonb->>'type') = 'forgotten-check-out'
+                   AND (r.data::jsonb->>'attendanceId') = a.id
                ))`,
           )
           .get(employee.id, date)
@@ -120,8 +175,10 @@ export class AttendanceService {
         schedule,
         timezone,
       };
-      this.db
-        .prepare('INSERT INTO attendance VALUES (?, ?, ?, ?, NULL, ?, ?)')
+      await this.db
+        .prepare(
+          'INSERT INTO attendance (id,employee_id,work_date,check_in,check_out,schedule,timezone) VALUES (?, ?, ?, ?, NULL, ?, ?)',
+        )
         .run(
           record.id,
           employee.id,
@@ -130,9 +187,17 @@ export class AttendanceService {
           JSON.stringify(schedule),
           timezone,
         );
-      this.evidence.save(record.id, 'check-in', evidence, record.checkIn);
-      this.location.start(record.id, actor);
-      this.auditService.record(
+      Object.assign(
+        record,
+        attendance(
+          (await this.db
+            .prepare('SELECT * FROM attendance WHERE id=?')
+            .get(record.id)) as AttendanceRow,
+        ),
+      );
+      await this.evidence.save(record.id, 'check-in', evidence, record.checkIn);
+      await this.location.start(record.id, actor);
+      await this.auditService.record(
         actor,
         'attendance.checked_in',
         record.id,
@@ -142,24 +207,23 @@ export class AttendanceService {
       return record;
     });
   }
-
-  checkOut(actor: Actor, id: string, evidence: Evidence) {
-    const employee = this.employeesService.employeeActor(actor);
-    return this.store.transaction(() => {
-      const row = this.db
+  async checkOut(actor: Actor, id: string, evidence: Evidence) {
+    const employee = await this.employeesService.employeeActor(actor);
+    return await this.store.transaction(async () => {
+      const row = (await this.db
         .prepare('SELECT * FROM attendance WHERE id = ? AND employee_id = ?')
-        .get(id, employee.id) as AttendanceRow | undefined;
+        .get(id, employee.id)) as AttendanceRow | undefined;
       if (!row) throw new NotFoundException('Attendance record not found');
       if (row.check_out) return attendance(row);
       const before = attendance(row);
       row.check_out = new Date().toISOString();
-      this.db
+      await this.db
         .prepare('UPDATE attendance SET check_out = ? WHERE id = ?')
         .run(row.check_out, row.id);
-      this.evidence.save(row.id, 'check-out', evidence, row.check_out);
-      this.location.reset(row.id);
+      await this.evidence.save(row.id, 'check-out', evidence, row.check_out);
+      await this.location.reset(row.id);
       const after = attendance(row);
-      this.auditService.record(
+      await this.auditService.record(
         actor,
         'attendance.checked_out',
         row.id,
@@ -169,12 +233,18 @@ export class AttendanceService {
       return after;
     });
   }
-
   async report(
     actor: Actor,
     filters: AttendanceFiltersDto,
   ): Promise<ReportRow[]> {
     if (actor.role !== 'manager') requireHr(actor);
+    const pending = this.pendingReports.get(actor.companyId) ?? 0;
+    if (pending >= 2)
+      throw new HttpException(
+        'This company already has reports queued. Try again shortly.',
+        429,
+      );
+    this.pendingReports.set(actor.companyId, pending + 1);
     const previous = this.reportQueue;
     let release!: () => void;
     this.reportQueue = new Promise<void>((done) => {
@@ -182,22 +252,34 @@ export class AttendanceService {
     });
     await previous;
     try {
-      return await this.buildReport(actor, filters);
+      await this.location.sweep();
+      return await this.store.snapshot(() => this.buildReport(actor, filters));
     } finally {
+      const remaining = (this.pendingReports.get(actor.companyId) ?? 1) - 1;
+      if (remaining) this.pendingReports.set(actor.companyId, remaining);
+      else this.pendingReports.delete(actor.companyId);
       release();
     }
   }
-
   private async buildReport(
     actor: Actor,
     filters: AttendanceFiltersDto,
   ): Promise<ReportRow[]> {
     if (actor.role !== 'manager') requireHr(actor);
-    this.location.sweep();
+    const history =
+      actor.role !== 'manager'
+        ? await this.employeesService.historicalScope(
+            actor,
+            filters.from,
+            filters.to,
+          )
+        : null;
     const employees = (
-      actor.role === 'manager'
-        ? this.employeesService.managedEmployees(actor)
-        : this.employeesService.employees(actor)
+      actor.role === 'hr'
+        ? history!.employees
+        : actor.role === 'manager'
+          ? await this.employeesService.managedEmployees(actor)
+          : await this.employeesService.employees(actor)
     ).filter(
       (e) =>
         (!filters.employeeId || e.id === filters.employeeId) &&
@@ -207,31 +289,33 @@ export class AttendanceService {
       employees.map((employee) => employee.id),
     );
     const records = (
-      this.db
+      (await this.db
         .prepare(
-          'SELECT * FROM attendance WHERE employee_id IN (SELECT value FROM json_each(?)) AND work_date >= ? AND work_date <= ?',
+          'SELECT * FROM attendance WHERE employee_id IN (SELECT value FROM jsonb_array_elements_text(?::jsonb)) AND work_date >= ? AND work_date <= ?',
         )
-        .all(employeeIds, filters.from, filters.to) as AttendanceRow[]
+        .all(employeeIds, filters.from, filters.to)) as AttendanceRow[]
     ).map(attendance);
-    const assigned = this.schedulesService.assignmentReader(
+    const assigned = await this.schedulesService.assignmentReader(
       employees.map((employee) => employee.id),
     );
-    const locations = this.location.views(
+    const locations = await this.location.views(
       employees.map((employee) => employee.id),
       filters.from,
       filters.to,
     );
-    const timezone = this.companyService.settings().timezone;
+    const timezone = (await this.companyService.settings()).timezone;
     const byKey = new Map(
       records.map((r) => [`${r.employeeId}:${r.workDate}`, r]),
     );
     const rows: ReportRow[] = [];
     const now = new Date();
-    const timeOff = this.db
-      .prepare(
-        "SELECT data FROM employee_requests WHERE status = 'approved' AND employee_id IN (SELECT value FROM json_each(?)) AND json_extract(data, '$.from') <= ? AND json_extract(data, '$.to') >= ?",
-      )
-      .all(employeeIds, filters.to, filters.from)
+    const timeOff = (
+      await this.db
+        .prepare(
+          "SELECT data FROM employee_requests WHERE status = 'approved' AND employee_id IN (SELECT value FROM jsonb_array_elements_text(?::jsonb)) AND (data::jsonb->>'from') <= ? AND (data::jsonb->>'to') >= ?",
+        )
+        .all(employeeIds, filters.to, filters.from)
+    )
       .map((r) => JSON.parse(r.data as string) as EmployeeRequest)
       .filter(
         (r) =>
@@ -252,7 +336,12 @@ export class AttendanceService {
       date = shiftDate(date, 1)
     ) {
       const day = weekday(date);
-      for (const employee of employees) {
+      for (const candidate of employees) {
+        const interval = history?.at(candidate.id, date);
+        if ((actor.role === 'hr' || filters.branchId) && !interval) continue;
+        if (filters.branchId && interval?.branchId !== filters.branchId)
+          continue;
+        const employee = actor.role === 'hr' ? interval!.employee : candidate;
         // Bound memory to one report and give sockets/writes time between batches.
         if (processed++ % 1000 === 0) await setImmediate();
         const record = byKey.get(`${employee.id}:${date}`);
@@ -287,7 +376,10 @@ export class AttendanceService {
         if (filters.status && filters.status !== status) continue;
         rows.push({
           id: record?.id ?? null,
+          branchId: record?.branchId ?? interval?.branchId,
+          branchName: record?.branchName ?? interval?.branchName,
           employeeId: employee.id,
+          employeeNumber: employee.employeeNumber,
           nationalId: actor.role === 'manager' ? '' : employee.nationalId,
           name: employee.name,
           department: employee.department,
@@ -310,42 +402,40 @@ export class AttendanceService {
     }
     return rows.reverse();
   }
-
-  correct(actor: Actor, id: string, input: AttendanceCorrectionDto) {
+  async correct(actor: Actor, id: string, input: AttendanceCorrectionDto) {
     requireHr(actor);
-    return this.store.transaction(() =>
-      this.correctInTransaction(actor, id, input),
+    return await this.store.transaction(
+      async () => await this.correctInTransaction(actor, id, input),
     );
   }
-
   // Shares the caller's transaction when approving an attendance request.
-  correctInTransaction(
+  async correctInTransaction(
     actor: Actor,
     id: string,
     input: AttendanceCorrectionDto,
   ) {
     requireHr(actor);
-    const row = this.db
+    const row = (await this.db
       .prepare('SELECT * FROM attendance WHERE id = ?')
-      .get(id) as AttendanceRow | undefined;
+      .get(id)) as AttendanceRow | undefined;
     if (!row) throw new NotFoundException('Attendance record not found');
     const before = attendance(row);
     const { checkIn, checkOut } = this.validateTimes(before, input);
     if (
       !checkOut &&
-      this.db
+      (await this.db
         .prepare(
           'SELECT id FROM attendance WHERE employee_id = ? AND check_out IS NULL AND id != ?',
         )
-        .get(before.employeeId, id)
+        .get(before.employeeId, id))
     )
       throw new ConflictException('Another attendance record is already open');
     const after = { ...before, checkIn, checkOut };
-    this.db
+    await this.db
       .prepare('UPDATE attendance SET check_in = ?, check_out = ? WHERE id = ?')
       .run(checkIn, checkOut, id);
-    this.location.reset(id);
-    this.auditService.record(
+    await this.location.reset(id);
+    await this.auditService.record(
       actor,
       'attendance.corrected',
       id,
@@ -355,11 +445,14 @@ export class AttendanceService {
     );
     return after;
   }
-
-  manualAttendance(actor: Actor, input: ManualAttendanceDto) {
+  async manualAttendance(actor: Actor, input: ManualAttendanceDto) {
     requireHr(actor);
-    return this.store.transaction(() => {
-      const employee = this.employeesService.employee(input.employeeId);
+    return await this.store.transaction(async () => {
+      const employee = await this.employeesService.historicalEmployee(
+        actor,
+        input.employeeId,
+        input.workDate,
+      );
       if (input.workDate < employee.startDate)
         throw new BadRequestException(
           'Attendance cannot start before employment begins',
@@ -370,15 +463,15 @@ export class AttendanceService {
         workDate: input.workDate,
         checkIn: input.checkIn,
         checkOut: input.checkOut,
-        schedule: this.schedulesService.assignedSchedule(
+        schedule: await this.schedulesService.assignedSchedule(
           employee.id,
           input.workDate,
         ),
-        timezone: this.companyService.settings().timezone,
+        timezone: (await this.companyService.settings()).timezone,
       };
       Object.assign(record, this.validateTimes(record, input));
       if (
-        this.db
+        await this.db
           .prepare(
             'SELECT id FROM attendance WHERE employee_id = ? AND work_date = ?',
           )
@@ -389,17 +482,19 @@ export class AttendanceService {
         );
       if (
         !record.checkOut &&
-        this.db
+        (await this.db
           .prepare(
             'SELECT id FROM attendance WHERE employee_id = ? AND check_out IS NULL',
           )
-          .get(employee.id)
+          .get(employee.id))
       )
         throw new ConflictException(
           'Another attendance record is already open',
         );
-      this.db
-        .prepare('INSERT INTO attendance VALUES (?, ?, ?, ?, ?, ?, ?)')
+      await this.db
+        .prepare(
+          'INSERT INTO attendance (id,employee_id,work_date,check_in,check_out,schedule,timezone) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        )
         .run(
           record.id,
           employee.id,
@@ -409,7 +504,15 @@ export class AttendanceService {
           JSON.stringify(record.schedule),
           record.timezone,
         );
-      this.auditService.record(
+      Object.assign(
+        record,
+        attendance(
+          (await this.db
+            .prepare('SELECT * FROM attendance WHERE id=?')
+            .get(record.id)) as AttendanceRow,
+        ),
+      );
+      await this.auditService.record(
         actor,
         'attendance.manual_entry',
         record.id,
@@ -420,7 +523,6 @@ export class AttendanceService {
       return record;
     });
   }
-
   validateTimes(record: Attendance, input: AttendanceCorrectionDto) {
     const checkIn = new Date(input.checkIn).toISOString();
     const checkOut = input.checkOut

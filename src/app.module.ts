@@ -1,7 +1,10 @@
+import { BranchesModule } from './branches/branches.module.js';
+import { OwnerModule } from './owner/owner.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { DepartmentsModule } from './departments/departments.module.js';
 import { Module } from '@nestjs/common';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { CompanyInterceptor } from './database/company.interceptor.js';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AttendanceModule } from './attendance/attendance.module.js';
@@ -17,10 +20,11 @@ import { RequestsModule } from './requests/requests.module.js';
 import { PayrollModule } from './payroll/payroll.module.js';
 import { SchedulesModule } from './schedules/schedules.module.js';
 import { SalesModule } from './sales/sales.module.js';
-
 @Module({
   imports: [
+    OwnerModule,
     DatabaseModule,
+    BranchesModule,
     NotificationsModule,
     DepartmentsModule,
     AuditModule,
@@ -39,6 +43,7 @@ import { SalesModule } from './sales/sales.module.js';
     AppService,
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_GUARD, useClass: RateLimitGuard },
+    { provide: APP_INTERCEPTOR, useClass: CompanyInterceptor },
   ],
 })
 export class AppModule {}

@@ -12,7 +12,6 @@ import type { Actor } from '../common/types/actor.type.js';
 import { parse } from '../common/validation/parse.js';
 import { CompanyService } from '../company/company.service.js';
 import { DatabaseService } from '../database/database.service.js';
-
 export const officePolicy = Object.freeze({
   latitude: 30.023092,
   longitude: 31.528179,
@@ -22,7 +21,6 @@ export const officePolicy = Object.freeze({
   maxPhotoBytes: 5 * 1024 * 1024,
   photoFormats: ['jpeg', 'png'] as const,
 });
-
 const captureSchema = z
   .object({
     latitude: z.coerce.number().min(-90).max(90),
@@ -34,14 +32,11 @@ const captureSchema = z
     capturedAt: z.iso.datetime({ offset: true }),
   })
   .strict();
-
 export type Evidence = z.infer<typeof captureSchema> & {
   distanceMeters: number;
   photo: Buffer;
 };
-
 export type AttendanceEvent = 'check-in' | 'check-out';
-
 export function validateLocation(
   body: unknown,
   policy: {
@@ -63,16 +58,23 @@ export function validateLocation(
     );
   return { ...input, distanceMeters };
 }
-
 @Injectable()
 export class AttendanceEvidence {
   constructor(
-    @Inject(CompanyService) private readonly company: CompanyService,
-    @Inject(DatabaseService) private readonly store: DatabaseService,
+    @Inject(CompanyService)
+    private readonly company: CompanyService,
+    @Inject(DatabaseService)
+    private readonly store: DatabaseService,
   ) {}
-
-  async prepare(body: unknown, file?: Express.Multer.File): Promise<Evidence> {
-    const location = validateLocation(body, this.company.settings());
+  async prepare(
+    body: unknown,
+    file?: Express.Multer.File,
+    policy?: { latitude: number; longitude: number; radiusMeters: number },
+  ): Promise<Evidence> {
+    const location = validateLocation(
+      body,
+      policy ?? (await this.company.settings()),
+    );
     if (!file?.buffer?.length)
       throw new BadRequestException('A photo of the place is required.');
     if (file.buffer.length > officePolicy.maxPhotoBytes)
@@ -106,19 +108,29 @@ export class AttendanceEvidence {
       );
     }
   }
-
-  save(
+  async save(
     id: string,
     event: AttendanceEvent,
     evidence: Evidence,
     submittedAt: string,
   ) {
     // Called inside the attendance transaction, so no orphan evidence is committed.
-    const policy = { ...officePolicy, ...this.company.settings() };
+    const record = await this.store
+      .prepare('SELECT branch_snapshot FROM attendance WHERE id=?')
+      .get(id);
+    if (!record) throw new NotFoundException('Attendance record not found');
+    const policy = {
+      ...officePolicy,
+      ...(
+        JSON.parse(record.branch_snapshot as string) as {
+          policy: typeof officePolicy;
+        }
+      ).policy,
+    };
     const location = validateLocation(evidenceFields(evidence), policy);
-    this.store.db
+    await this.store.db
       .prepare(
-        'INSERT INTO attendance_evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO attendance_evidence (attendance_id,event,latitude,longitude,accuracy_meters,distance_meters,captured_at,submitted_at,policy,photo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       )
       .run(
         id,
@@ -133,30 +145,29 @@ export class AttendanceEvidence {
         evidence.photo,
       );
   }
-
-  list(actor: Actor, id: string) {
-    this.authorize(actor, id);
-    return this.store.db
-      .prepare(
-        'SELECT event, latitude, longitude, accuracy_meters, distance_meters, captured_at, submitted_at, policy FROM attendance_evidence WHERE attendance_id = ? ORDER BY event',
-      )
-      .all(id)
-      .map((r) => ({
-        event: r.event,
-        latitude: r.latitude,
-        longitude: r.longitude,
-        accuracyMeters: r.accuracy_meters,
-        distanceMeters: r.distance_meters,
-        capturedAt: r.captured_at,
-        submittedAt: r.submitted_at,
-        policy: JSON.parse(r.policy as string) as typeof officePolicy,
-        photoUrl: `/api/attendance/${id}/photos/${r.event as string}`,
-      }));
+  async list(actor: Actor, id: string) {
+    await this.authorize(actor, id);
+    return (
+      await this.store.db
+        .prepare(
+          'SELECT event, latitude, longitude, accuracy_meters, distance_meters, captured_at, submitted_at, policy FROM attendance_evidence WHERE attendance_id = ? ORDER BY event',
+        )
+        .all(id)
+    ).map((r) => ({
+      event: r.event,
+      latitude: r.latitude,
+      longitude: r.longitude,
+      accuracyMeters: r.accuracy_meters,
+      distanceMeters: r.distance_meters,
+      capturedAt: r.captured_at,
+      submittedAt: r.submitted_at,
+      policy: JSON.parse(r.policy as string) as typeof officePolicy,
+      photoUrl: `/api/attendance/${id}/photos/${r.event as string}`,
+    }));
   }
-
-  photo(actor: Actor, id: string, event: AttendanceEvent) {
-    this.authorize(actor, id);
-    const row = this.store.db
+  async photo(actor: Actor, id: string, event: AttendanceEvent) {
+    await this.authorize(actor, id);
+    const row = await this.store.db
       .prepare(
         'SELECT photo FROM attendance_evidence WHERE attendance_id = ? AND event = ?',
       )
@@ -164,28 +175,37 @@ export class AttendanceEvidence {
     if (!row) throw new NotFoundException('Attendance photo not found');
     return Buffer.from(row.photo as Uint8Array);
   }
-
-  private authorize(actor: Actor, id: string) {
-    const row = this.store.db
-      .prepare('SELECT employee_id FROM attendance WHERE id = ?')
+  private async authorize(actor: Actor, id: string) {
+    const row = await this.store.db
+      .prepare('SELECT employee_id,branch_id FROM attendance WHERE id = ?')
       .get(id);
+    if (
+      row &&
+      actor.role === 'hr' &&
+      row.employee_id !== actor.employeeId &&
+      !(await this.store
+        .prepare(
+          'SELECT 1 FROM hr_branch_grants WHERE user_id=? AND branch_id=?',
+        )
+        .get(actor.id, row.branch_id))
+    )
+      throw new NotFoundException('Attendance record not found');
     if (
       !row ||
       ((actor.role === 'employee' || actor.role === 'manager') &&
         actor.employeeId !== row.employee_id &&
         !(
           actor.role === 'manager' &&
-          this.store.db
+          (await this.store.db
             .prepare(
-              "SELECT 1 FROM employees WHERE id = ? AND json_extract(data, '$.managerId') = ?",
+              "SELECT 1 FROM employees WHERE id = ? AND (data::jsonb->>'managerId') = ?",
             )
-            .get(row.employee_id, actor.employeeId)
+            .get(row.employee_id, actor.employeeId))
         ))
     )
       throw new NotFoundException('Attendance record not found');
   }
 }
-
 function evidenceFields(evidence: Evidence) {
   return {
     latitude: evidence.latitude,

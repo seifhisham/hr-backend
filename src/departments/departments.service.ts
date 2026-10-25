@@ -7,28 +7,38 @@ import type { CreateDepartmentDto } from './dto/department.dto.js';
 @Injectable()
 export class DepartmentsService {
   constructor(
-    @Inject(DatabaseService) private readonly store: DatabaseService,
-    @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(DatabaseService)
+    private readonly store: DatabaseService,
+    @Inject(AuditService)
+    private readonly audit: AuditService,
   ) {}
-  list(actor: Actor) {
+  async list(actor: Actor) {
     requireHr(actor);
-    return this.store.cachedRead('departments', () =>
-      this.store.db
-        .prepare('SELECT name FROM departments ORDER BY name COLLATE NOCASE')
-        .all()
-        .map((row) => ({ name: row.name as string })),
+    return await this.store.cachedRead('departments', async () =>
+      (
+        await this.store.db
+          .prepare('SELECT name FROM departments ORDER BY lower(name)')
+          .all()
+      ).map((row) => ({ name: row.name as string })),
     );
   }
-
-  create(actor: Actor, input: CreateDepartmentDto) {
+  async create(actor: Actor, input: CreateDepartmentDto) {
     requireHr(actor);
-    return this.store.transaction(() => {
-      const inserted = this.store.db
-        .prepare('INSERT OR IGNORE INTO departments (name) VALUES (?)')
+    return await this.store.transaction(async () => {
+      const inserted = await this.store.db
+        .prepare(
+          'INSERT INTO departments (name) VALUES (?) ON CONFLICT DO NOTHING',
+        )
         .run(input.name);
       if (!inserted.changes)
         throw new ConflictException('Department already exists');
-      this.audit.record(actor, 'department.created', input.name, null, input);
+      await this.audit.record(
+        actor,
+        'department.created',
+        input.name,
+        null,
+        input,
+      );
       return input;
     });
   }

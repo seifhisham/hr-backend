@@ -4,17 +4,16 @@ import { randomUUID } from 'node:crypto';
 import { requireHr } from '../common/security/permissions.js';
 import type { Actor } from '../common/types/actor.type.js';
 import { DatabaseService } from '../database/database.service.js';
-
 @Injectable()
 export class AuditService {
   constructor(
-    @Inject(DatabaseService) private readonly store: DatabaseService,
+    @Inject(DatabaseService)
+    private readonly store: DatabaseService,
   ) {}
   private get db() {
     return this.store.db;
   }
-
-  auditHistory(actor: Actor, recordId?: string, query?: AuditQuery) {
+  async auditHistory(actor: Actor, recordId?: string, query?: AuditQuery) {
     requireHr(actor);
     const clauses: string[] = [];
     const values: (string | number)[] = [];
@@ -29,7 +28,7 @@ export class AuditService {
       }
     }
     if (query?.before) {
-      clauses.push('rowid < (SELECT rowid FROM audit WHERE id = ?)');
+      clauses.push('row_order < (SELECT row_order FROM audit WHERE id = ?)');
       values.push(query.before);
     }
     if (query?.from) {
@@ -44,33 +43,33 @@ export class AuditService {
     }
     if (query?.search) {
       clauses.push(
-        "instr(lower(actor_name || ' ' || actor_id || ' ' || action || ' ' || record_id || ' ' || coalesce(reason, '') || ' ' || coalesce(before_data, '') || ' ' || coalesce(after_data, '')), lower(?)) > 0",
+        "strpos(lower(actor_name || ' ' || actor_id || ' ' || action || ' ' || record_id || ' ' || coalesce(reason, '') || ' ' || coalesce(before_data, '') || ' ' || coalesce(after_data, '')), lower(?)) > 0",
       );
       values.push(query.search);
     }
-    return this.db
-      .prepare(
-        `SELECT * FROM audit ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY rowid DESC LIMIT ?`,
-      )
-      .all(...values, query?.limit ?? 100)
-      .map((r) => ({
-        id: r.id,
-        actor: r.actor_name,
-        actorId: r.actor_id,
-        action: r.action,
-        recordId: r.record_id,
-        at: r.at,
-        reason: r.reason,
-        before: r.before_data
-          ? (JSON.parse(r.before_data as string) as unknown)
-          : null,
-        after: r.after_data
-          ? (JSON.parse(r.after_data as string) as unknown)
-          : null,
-      }));
+    return (
+      await this.db
+        .prepare(
+          `SELECT * FROM audit ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY row_order DESC LIMIT ?`,
+        )
+        .all(...values, query?.limit ?? 100)
+    ).map((r) => ({
+      id: r.id,
+      actor: r.actor_name,
+      actorId: r.actor_id,
+      action: r.action,
+      recordId: r.record_id,
+      at: r.at,
+      reason: r.reason,
+      before: r.before_data
+        ? (JSON.parse(r.before_data as string) as unknown)
+        : null,
+      after: r.after_data
+        ? (JSON.parse(r.after_data as string) as unknown)
+        : null,
+    }));
   }
-
-  record(
+  async record(
     actor: Actor,
     action: string,
     recordId: string,
@@ -78,8 +77,10 @@ export class AuditService {
     after: unknown,
     reason: string | null = null,
   ) {
-    this.db
-      .prepare('INSERT INTO audit VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    await this.db
+      .prepare(
+        'INSERT INTO audit (id,actor_id,actor_name,action,record_id,at,reason,before_data,after_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      )
       .run(
         randomUUID(),
         actor.id,

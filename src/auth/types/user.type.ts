@@ -1,6 +1,6 @@
 import type { Actor } from '../../common/types/actor.type.js';
-
 export type User = {
+  company_id: string;
   id: string;
   email: string;
   name: string;

@@ -4,7 +4,6 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module.js';
 import { AttendanceService } from '../src/attendance/attendance.service.js';
 import { DatabaseService } from '../src/database/database.service.js';
-
 it.each([
   ['attendance', 'logout'],
   ['attendance/export', 'logout'],
@@ -23,9 +22,11 @@ it.each([
     let release!: () => void;
     try {
       const db = app.get(DatabaseService).db;
-      const schedule = db.prepare('SELECT id FROM schedules LIMIT 1').get()!
-        .id as string;
+      const schedule = (await db
+        .prepare('SELECT id FROM schedules LIMIT 1')
+        .get())!.id as string;
       const employee = {
+        employeeNumber: 'EMP-000001',
         id: randomUUID(),
         nationalId: 'PRIVATE-TEST',
         name: 'Private employee',
@@ -34,17 +35,21 @@ it.each([
         startDate: '2026-01-01',
         scheduleId: schedule,
       };
-      db.prepare('INSERT INTO employees VALUES (?, ?, ?, ?)').run(
-        employee.id,
-        employee.nationalId,
-        'private@test.local',
-        JSON.stringify(employee),
-      );
-      db.prepare('INSERT INTO employee_schedules VALUES (?, ?, ?)').run(
-        employee.id,
-        '2026-01-01',
-        schedule,
-      );
+      await db
+        .prepare(
+          'INSERT INTO employees (id,code,email,data) VALUES (?, ?, ?, ?)',
+        )
+        .run(
+          employee.id,
+          employee.nationalId,
+          'private@test.local',
+          JSON.stringify(employee),
+        );
+      await db
+        .prepare(
+          'INSERT INTO employee_schedules (employee_id,effective_from,schedule_id) VALUES (?, ?, ?)',
+        )
+        .run(employee.id, '2026-01-01', schedule);
       const login = await request(app.getHttpServer())
         .post('/api/auth/login')
         .send({
@@ -81,9 +86,9 @@ it.each([
           .set(headers)
           .expect(201);
       else
-        db.prepare("UPDATE users SET role = 'employee' WHERE email = ?").run(
-          'report-access@test.local',
-        );
+        await db
+          .prepare("UPDATE users SET role = 'employee' WHERE email = ?")
+          .run('report-access@test.local');
       release();
       const response = await pending;
       expect(response.status).toBe(change === 'logout' ? 401 : 403);

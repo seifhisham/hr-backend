@@ -1,18 +1,21 @@
 import type { Schedule } from '../../schedules/types/schedule.type.js';
 import type { AttendanceLocationService } from '../attendance-location.service.js';
-
 export type Attendance = {
   id: string;
   employeeId: string;
+  branchId?: string;
+  branchName?: string;
   workDate: string;
   checkIn: string;
   checkOut: string | null;
   schedule: Schedule;
   timezone: string;
 };
-
 export type ReportRow = {
-  location: ReturnType<AttendanceLocationService['view']>;
+  employeeNumber?: string;
+  branchId?: string;
+  branchName?: string;
+  location: Awaited<ReturnType<AttendanceLocationService['view']>>;
   id: string | null;
   employeeId: string;
   nationalId: string;

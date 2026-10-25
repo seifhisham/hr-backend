@@ -1,12 +1,16 @@
 # HR REST API
 
+Platform-owner login/MFA, company onboarding and migration 4: see [owner API and runbook](OWNER.md).
+
+Company/branch permissions, migration 3 and dashboard administration: see [branch API and safe upgrade](BRANCHES.md).
+
 Confirmed policy: standard hours are 10:00-18:00 and sales hours are 11:00-19:00, Sunday-Thursday with a 15-minute grace period; check-out is mandatory. Both employee attendance endpoints enforce location and photo evidence at latitude 30.023092, longitude 31.528179, within 50 metres. Employee request APIs and HR dashboard review are implemented; Flutter screens are deferred.
 
 Base URL for this workspace: `http://127.0.0.1:3002/api`.
 
 ### Attendance location monitoring
 
-`POST /attendance/:id/location` accepts authenticated JSON for an owned open record: `{ "available": true, "latitude": 30.026, "longitude": 31.528179, "accuracyMeters": 10, "capturedAt": "2026-10-12T08:00:00Z" }`, or `{ "available": false }`. Success returns HTTP 201 with location state. `GET /attendance/policy` includes `tracking` (150-metre departure radius, 300-second grace, 30-second reporting target, 90-second staleness limit). Own records and authorized report rows include `location`; CSV exports include status/deadline. Fresh, accurate outside readings confirm departure before a persisted return timer begins. Return or unavailable/stale/uncertain location cancels it. A ten-second backend worker closes attendance at the deadline only with fresh outside evidence, records `attendance.auto_checked_out`, and creates no payroll deduction/photo. Manual capture remains within 50 metres. See [the complete REST contract and mobile acceptance cases](../MOBILE-LOCATION.md).
+`POST /attendance/:id/location` accepts authenticated JSON for an owned open record: `{ "available": true, "latitude": 30.026, "longitude": 31.528179, "accuracyMeters": 10, "capturedAt": "2026-10-12T08:00:00Z" }`, or `{ "available": false }`. Success returns HTTP 201 with location state. `GET /attendance/policy` includes `tracking` (150-metre departure radius, 300-second grace, 30-second reporting target, 90-second staleness limit). Own records and authorized report rows include `location`; CSV exports include status/deadline. Fresh, accurate outside readings confirm departure before a persisted return timer begins. Return or unavailable/stale/uncertain location cancels it. A ten-second backend worker closes attendance at the deadline only with fresh outside evidence, records `attendance.auto_checked_out`, and creates no payroll deduction/photo. Manual capture remains within 50 metres. See [the complete REST contract and mobile acceptance cases](../docs/mobile/MOBILE-LOCATION.md).
 
 Requests and responses use JSON except multipart attendance uploads, JPEG photo responses, and CSV export. Protected endpoints accept `Authorization: Bearer <token>` for native clients or the `hr_session` cookie for the dashboard. Browser mutations must originate from an origin listed in `HR_ALLOWED_ORIGINS`; the production cookie requires HTTPS. Browser requests pass through the dashboard's same-origin HTTP proxy, so the API does not enable cross-origin browser access.
 
@@ -15,10 +19,10 @@ Requests and responses use JSON except multipart attendance uploads, JPEG photo 
 `POST /auth/login` (public):
 
 ```json
-{ "email": "employee@company.example", "password": "a-unique-account-password" }
+{ "workspace": "company-code", "email": "employee@company.example", "password": "a-unique-account-password" }
 ```
 
-Returns `{ "user": { "id", "name", "email", "role", "employeeId" }, "token": "..." }` and sets an HttpOnly cookie. The Flutter app should retain the token in its platform's secure storage and send it as a bearer token. Browser code uses the cookie and does not persist the token in local storage. Tokens expire after 12 hours; no refresh endpoint is provided in this phase.
+Returns `{ "user": { "companyId", "id", "name", "email", "role", "employeeId" }, "token": "..." }` and sets an HttpOnly cookie. The Flutter app should retain the token in its platform's secure storage and send it as a bearer token. Browser code uses the cookie and does not persist the token in local storage. Tokens expire after 12 hours; no refresh endpoint is provided in this phase.
 
 - `GET /auth/me`: user, own employee profile (or null for the bootstrap admin), company settings, and today's date in the company timezone.
 - `POST /auth/logout`: revokes the supplied session.
@@ -56,7 +60,7 @@ Employee body:
 
 Roles: `employee`, `hr`, `admin`. Only administrators can create or edit HR/admin accounts or assign privileged roles. National ID and account email are unique, ignoring case. Deactivation keeps historical attendance and immediately invalidates active sessions. Users cannot change their own role or deactivate their own employee account.
 
-`nationalId` is a required, trimmed string (maximum 120 characters), not a number; leading zeros are preserved. Country-specific ID validation is not configured. This replaces the previous `employeeCode` request/response field, including attendance reports and employee request responses. Existing employee/request JSON is upgraded automatically at database initialization without changing identifier values. HR must review legacy codes and replace them with actual national IDs. Historical audit payloads remain unchanged. The internal SQLite `code` column retains its unique constraint and now stores the national ID.
+`nationalId` is a required, trimmed string (maximum 120 characters), not a number; leading zeros are preserved. Country-specific ID validation is not configured. This replaces the previous `employeeCode` request/response field, including attendance reports and employee request responses. Legacy employee/request JSON is upgraded on an isolated SQLite copy before explicit PostgreSQL import, preserving identifier values. HR must review legacy codes and replace them with actual national IDs. Historical audit payloads remain unchanged. The internal PostgreSQL `code` column retains its company-scoped unique constraint and now stores the national ID.
 
 ## Work Schedules and Settings
 
@@ -93,7 +97,7 @@ Both POST endpoints require `multipart/form-data` with exactly four text fields:
 
 Technical defaults: GPS accuracy must be positive and at most 50 metres; capture age must be at most 120 seconds, with 10 seconds allowed for future clock skew. The measured position must be within 50 metres; accuracy does not expand the radius. Photos must be non-animated JPEG/PNG, at most 5 MiB and 20 megapixels. The server decodes and normalizes them to JPEG at most 1280 pixels per dimension, removing EXIF. Invalid or missing evidence returns 400, an outside-office position returns 403, and oversized multipart uploads return 413. Failed submissions do not change attendance.
 
-Evidence and photos are stored privately in SQLite with the attendance transaction. HR's reason-required, audited manual entries and corrections remain an explicit exception; historical/manual records may have no evidence. Retention duration still needs company approval. The later Flutter app must capture current GPS and a fresh camera image for each event. Client coordinates and capture time are not proof against spoofing; the backend checks image validity, not whether its scene actually depicts the office.
+Evidence and photos are stored privately in PostgreSQL with the attendance transaction. HR's reason-required, audited manual entries and corrections remain an explicit exception; historical/manual records may have no evidence. Retention duration still needs company approval. The later Flutter app must capture current GPS and a fresh camera image for each event. Client coordinates and capture time are not proof against spoofing; the backend checks image validity, not whether its scene actually depicts the office.
 
 Attendance record:
 
@@ -114,6 +118,8 @@ Do not display a success state before the API responds successfully. If a respon
 ## Employee Requests and HR Decisions
 
 ### Request list pagination
+
+Login now accepts company code as `workspace` (lowercase letters/digits/hyphens, 2–63 characters). Clients should always send it; omission is accepted only when HR_DEFAULT_WORKSPACE is explicitly configured. Sessions resolve company identity on the server; caller-supplied company headers do not change it. Existing endpoint paths, response shapes and business permissions remain, with companyId added to user identity. Branch-restricted HR APIs are implemented; platform-owner APIs are implemented in migration 4. See the branch guide for permission changes.
 
 `GET /requests`, `GET /requests/me`, and `GET /requests/managed` return arrays ordered newest first. Each response defaults to 50 items. Use `limit` (integer 1–100), optional `status` (`pending`, `approved`, `rejected`, `withdrawn`), and optional `before` (the last request UUID from the previous page). Example: `/requests/me?limit=50&status=pending&before=<last-id>`. Keep the same filters while paging. A page shorter than `limit` ends the list; a full page may require one more read to determine the end. An unknown or deleted cursor returns an empty page. Unknown query fields and invalid values return 400.
 
@@ -249,8 +255,8 @@ On first startup after upgrading, existing department assignments are converted 
 
 HR/admin can approve and permanently lock a current or past month's payroll from the Payroll section. The approval saves the reviewed employee roster, names/numbers, departments, active flags, currencies, gross salaries, daily rates, deduction days and amounts, net salaries, request deduction breakdowns, and manual deductions with their reasons/approvers/recorders. Company name and timezone are also saved. Employee or company edits after approval affect draft months and do not recalculate approved payroll.
 
-- `GET /api/payroll/run?month=YYYY-MM` (HR/admin) returns `{ month, status, company, timezone, revision, approvedAt, approvedBy, approvedById, approvalReason, rows }`. Status is `draft` or `approved`. Approval fields are null for a draft. `rows` has the existing payroll row shape. `revision` is an opaque 64-character lowercase hexadecimal value representing the reviewed amounts and context.
-- `POST /api/payroll/approve` (HR/admin) takes a strict JSON body containing `month`, `expectedRevision` (the revision returned by the reviewed run), and a trimmed `reason` of 5–500 characters. It returns the approved run with HTTP 201. All employee salaries in the run must be configured, and the run must contain employees. Zero salary is valid. Future months cannot be approved (400); missing salaries, empty payroll, an already locked month, or changed reviewed data return 409. Invalid body/month/revision returns 400; employee access is 403; unauthenticated access is 401.
+- `GET /api/payroll/run?month=YYYY-MM` (HR/admin) returns `{ month, status, company, timezone, revision, approvedAt, approvedBy, approvedById, approvalReason, rows }`. Status is `draft` or `approved`. Approval fields are null for a draft. `rows` has the existing payroll row shape. `revision` is an opaque 64-character lowercase hexadecimal value for an administrator-reviewed run. HR receives a redacted branch view with revision `branch-view` and cannot approve it.
+- `POST /api/payroll/approve` (company administrator only) takes a strict JSON body containing `month`, `expectedRevision` (the revision returned by the reviewed run), and a trimmed `reason` of 5–500 characters. It returns the approved run with HTTP 201. All employee salaries in the run must be configured, and the run must contain employees. Zero salary is valid. Future months cannot be approved (400); missing salaries, empty payroll, an already locked month, or changed reviewed data return 409. Invalid body/month/revision returns 400; employee access is 403; unauthenticated access is 401.
 - Approval recalculates and compares the reviewed revision inside the same database transaction that stores the snapshot and `payroll.approved` audit event. If anything changed, refresh and review the new payroll before submitting again. A failed audit rolls back the approval. A second approval cannot replace an existing snapshot. There is no unlock/reapproval endpoint.
 - `GET /api/payroll?month=YYYY-MM` remains compatible: it returns the saved employee rows for an approved month and live rows for a draft month. Consumers that need approval status should use `/api/payroll/run`. Approved snapshots and locks survive application restarts.
 - `POST /api/payroll/deductions` rejects a locked target month with 409. Final HR decisions that would create a salary deduction in an already locked decision month also return 409; the request stays pending. Manager review, employee withdrawal of pending requests, and attendance corrections without salary deductions remain available.
@@ -271,7 +277,7 @@ HR/admin can approve and permanently lock a current or past month's payroll from
 
 ## Real estate sales activities
 
-Sales is implemented by `src/sales/` and covered by `test/sales.e2e-spec.ts`. Read [../MOBILE-SALES.md](../MOBILE-SALES.md) for exact employee activity bodies, statuses, responses, concurrency rules and manager mobile integration. All endpoints require authentication.
+Sales is implemented by `src/sales/` and covered by `test/sales.e2e-spec.ts`. Read [the mobile sales guide](../docs/mobile/MOBILE-SALES.md) for exact employee activity bodies, statuses, responses, concurrency rules and manager mobile integration. All endpoints require authentication.
 
 - Employee create/update accepts optional boolean `salesEnabled`. Omission preserves an existing setting; new/legacy employees default false. Read responses include the current boolean. HR/admin controls this flag; account role/department alone does not enable personal submission.
 - `GET /api/sales/access`: `{ canSubmit, canReview, canSetTargets }`. Personal submission requires an active sales-enabled profile. Review access is HR/admin or a manager with direct reports; targets are HR/admin only. Current per-record `canReview` also excludes self-review.

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { DatabaseService } from '../src/database/database.service.js';
+import { LegacySqliteStore as DatabaseService } from '../src/database/legacy-sqlite.js';
 import { DATABASE_SCHEMA } from '../src/database/database.schema.js';
 
 it('converts existing department manager assignments to direct reports once', () => {

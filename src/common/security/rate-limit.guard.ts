@@ -49,7 +49,7 @@ export class RateLimitGuard implements CanActivate {
       this.nextCleanup = now + 60_000;
     }
     const policy = RATE_LIMITS[bucket];
-    const key = `${req.actor.id}:${bucket}`;
+    const key = `${req.actor.companyId}:${req.actor.id}:${bucket}`;
     let counter = this.counters.get(key);
     if (!counter || counter.resetAt <= now) {
       counter = { count: 0, resetAt: now + policy.windowMs };

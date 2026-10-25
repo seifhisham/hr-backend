@@ -15,7 +15,6 @@ import { parse } from '../common/validation/parse.js';
 import { DatabaseService } from '../database/database.service.js';
 import { EmployeesService } from '../employees/employees.service.js';
 import { CompanyService } from '../company/company.service.js';
-
 export const trackingPolicy = Object.freeze({
   radiusMeters: 150,
   graceSeconds: 300,
@@ -48,30 +47,50 @@ type Tracking = {
   autoCheckedOutAt: string | null;
   actor: Actor;
 };
-
 @Injectable()
 export class AttendanceLocationService
   implements OnModuleInit, OnModuleDestroy
 {
   private timer?: ReturnType<typeof setInterval>;
   private readonly logger = new Logger(AttendanceLocationService.name);
+  private processing = false;
   constructor(
-    @Inject(CompanyService) private readonly company: CompanyService,
-    @Inject(DatabaseService) private readonly store: DatabaseService,
-    @Inject(EmployeesService) private readonly employees: EmployeesService,
-    @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(CompanyService)
+    private readonly company: CompanyService,
+    @Inject(DatabaseService)
+    private readonly store: DatabaseService,
+    @Inject(EmployeesService)
+    private readonly employees: EmployeesService,
+    @Inject(AuditService)
+    private readonly audit: AuditService,
   ) {}
-  policy() {
-    const settings = this.company.settings();
-    return { ...trackingPolicy, radiusMeters: settings.trackingRadiusMeters, graceSeconds: settings.trackingGraceMinutes * 60 };
+  async policy(id?: string) {
+    const settings = id
+      ? (
+          JSON.parse(
+            (await this.store
+              .prepare('SELECT branch_snapshot FROM attendance WHERE id=?')
+              .get(id))!.branch_snapshot as string,
+          ) as { policy: Awaited<ReturnType<CompanyService['settings']>> }
+        ).policy
+      : await this.company.settings();
+    return {
+      ...trackingPolicy,
+      radiusMeters: settings.trackingRadiusMeters,
+      graceSeconds: settings.trackingGraceMinutes * 60,
+    };
   }
-
   onModuleInit() {
-    this.timer = setInterval(() => {
+    this.timer = setInterval(async () => {
+      if (this.processing) return;
+      this.processing = true;
       try {
-        this.sweep();
+        for (const companyId of await this.store.activeCompanyIds())
+          await this.store.withCompany(companyId, () => this.sweep());
       } catch {
         this.logger.error('Attendance location processing failed');
+      } finally {
+        this.processing = false;
       }
     }, 10000);
     this.timer.unref();
@@ -79,9 +98,8 @@ export class AttendanceLocationService
   onModuleDestroy() {
     clearInterval(this.timer);
   }
-
-  start(id: string, actor: Actor) {
-    this.save(id, {
+  async start(id: string, actor: Actor) {
+    await this.save(id, {
       status: 'unavailable',
       lastCapturedAt: null,
       outsideSince: null,
@@ -92,21 +110,21 @@ export class AttendanceLocationService
       actor,
     });
   }
-  reset(id: string) {
-    this.store.db
+  async reset(id: string) {
+    await this.store.db
       .prepare('DELETE FROM attendance_location WHERE attendance_id = ?')
       .run(id);
   }
-  private load(id: string): Tracking | null {
-    const row = this.store.db
+  private async load(id: string): Promise<Tracking | null> {
+    const row = await this.store.db
       .prepare('SELECT data FROM attendance_location WHERE attendance_id = ?')
       .get(id);
     return row ? (JSON.parse(row.data as string) as Tracking) : null;
   }
-  private save(id: string, state: Tracking) {
-    this.store.db
+  private async save(id: string, state: Tracking) {
+    await this.store.db
       .prepare(
-        'INSERT INTO attendance_location VALUES (?, ?) ON CONFLICT(attendance_id) DO UPDATE SET data = excluded.data',
+        'INSERT INTO attendance_location (attendance_id,data) VALUES (?, ?) ON CONFLICT(company_id,attendance_id) DO UPDATE SET data = excluded.data',
       )
       .run(id, JSON.stringify(state));
   }
@@ -122,22 +140,23 @@ export class AttendanceLocationService
         trackingPolicy.staleAfterSeconds * 1000
     );
   }
-  view(id: string) {
-    const state = this.load(id);
+  async view(id: string) {
+    const state = await this.load(id);
     return this.present(state, Date.now());
   }
-  views(employeeIds: string[], from: string, to: string) {
+  async views(employeeIds: string[], from: string, to: string) {
     const now = Date.now();
     return new Map(
-      this.store.db
-        .prepare(
-          'SELECT l.attendance_id, l.data FROM attendance_location l JOIN attendance a ON a.id = l.attendance_id WHERE a.employee_id IN (SELECT value FROM json_each(?)) AND a.work_date >= ? AND a.work_date <= ?',
-        )
-        .all(JSON.stringify(employeeIds), from, to)
-        .map((row) => [
-          row.attendance_id as string,
-          this.present(JSON.parse(row.data as string) as Tracking, now),
-        ]),
+      (
+        await this.store.db
+          .prepare(
+            'SELECT l.attendance_id, l.data FROM attendance_location l JOIN attendance a ON a.id = l.attendance_id WHERE a.employee_id IN (SELECT value FROM jsonb_array_elements_text(?::jsonb)) AND a.work_date >= ? AND a.work_date <= ?',
+          )
+          .all(JSON.stringify(employeeIds), from, to)
+      ).map((row) => [
+        row.attendance_id as string,
+        this.present(JSON.parse(row.data as string) as Tracking, now),
+      ]),
     );
   }
   private present(state: Tracking | null, now: number) {
@@ -146,11 +165,11 @@ export class AttendanceLocationService
       this.unavailable(state);
     return this.publicState(state);
   }
-  update(actor: Actor, id: string, body: unknown) {
+  async update(actor: Actor, id: string, body: unknown) {
     const input = parse(locationSchema, body);
-    const employee = this.employees.employeeActor(actor);
-    return this.store.transaction(() => {
-      const row = this.store.db
+    const employee = await this.employees.employeeActor(actor);
+    return await this.store.transaction(async () => {
+      const row = await this.store.db
         .prepare(
           'SELECT check_out FROM attendance WHERE id = ? AND employee_id = ?',
         )
@@ -158,25 +177,30 @@ export class AttendanceLocationService
       if (!row) throw new NotFoundException('Attendance record not found');
       if (row.check_out)
         throw new ConflictException('Attendance is already checked out');
-      let state = this.load(id);
+      let state = await this.load(id);
       if (!state) {
-        this.start(id, actor);
-        state = this.load(id)!;
+        await this.start(id, actor);
+        state = (await this.load(id))!;
       }
       const now = Date.now();
       if (this.stale(state, now)) this.unavailable(state);
-      this.apply(state, input, now);
+      await this.apply(state, input, now, id);
       state.actor = actor;
-      this.save(id, state);
-      return this.view(id);
+      await this.save(id, state);
+      return await this.view(id);
     });
   }
-  private apply(state: Tracking, input: LocationInput, now: number) {
+  private async apply(
+    state: Tracking,
+    input: LocationInput,
+    now: number,
+    id: string,
+  ) {
     if (!input.available) {
       this.unavailable(state);
       return;
     }
-    const policy = this.policy();
+    const policy = await this.policy(id);
     const captured = Date.parse(input.capturedAt);
     if (
       captured > now ||
@@ -197,16 +221,23 @@ export class AttendanceLocationService
     )
       this.unavailable(state);
     state.lastCapturedAt = new Date(captured).toISOString();
-    state.distanceMeters = getDistance(input, this.company.settings(), 0.01);
+    state.distanceMeters = getDistance(
+      input,
+      (
+        JSON.parse(
+          (await this.store
+            .prepare('SELECT branch_snapshot FROM attendance WHERE id=?')
+            .get(id))!.branch_snapshot as string,
+        ) as { policy: { latitude: number; longitude: number } }
+      ).policy,
+      0.01,
+    );
     state.accuracyMeters = input.accuracyMeters;
     if (input.accuracyMeters > trackingPolicy.maxAccuracyMeters) {
       this.unavailable(state);
       return;
     }
-    if (
-      state.distanceMeters + input.accuracyMeters <=
-      policy.radiusMeters
-    ) {
+    if (state.distanceMeters + input.accuracyMeters <= policy.radiusMeters) {
       state.status = 'inside';
       state.outsideSince = null;
       state.returnBy = null;
@@ -226,10 +257,10 @@ export class AttendanceLocationService
         ).toISOString();
     } else this.unavailable(state);
   }
-  sweep() {
-    this.store.transaction(() => {
+  async sweep() {
+    await this.store.transaction(async () => {
       const now = Date.now();
-      const rows = this.store.db
+      const rows = await this.store.db
         .prepare(
           'SELECT a.id, l.data FROM attendance a JOIN attendance_location l ON l.attendance_id = a.id WHERE a.check_out IS NULL',
         )
@@ -243,14 +274,14 @@ export class AttendanceLocationService
           now >= Date.parse(state.returnBy)
         ) {
           const checkOut = state.returnBy;
-          this.store.db
+          await this.store.db
             .prepare(
               'UPDATE attendance SET check_out = ? WHERE id = ? AND check_out IS NULL',
             )
             .run(checkOut, row.id);
           state.status = 'auto-checked-out';
           state.autoCheckedOutAt = checkOut;
-          this.audit.record(
+          await this.audit.record(
             { ...state.actor, name: 'Automatic location checkout' },
             'attendance.auto_checked_out',
             row.id as string,
@@ -261,7 +292,7 @@ export class AttendanceLocationService
           state.returnBy = null;
         }
         if (JSON.stringify(state) !== row.data)
-          this.save(row.id as string, state);
+          await this.save(row.id as string, state);
       }
     });
   }

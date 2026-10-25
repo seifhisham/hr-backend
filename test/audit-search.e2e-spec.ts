@@ -6,7 +6,6 @@ import { DatabaseService } from '../src/database/database.service.js';
 import { AuditService } from '../src/audit/audit.service.js';
 import { AuthService } from '../src/auth/auth.service.js';
 import type { Actor } from '../src/common/types/actor.type.js';
-
 it('searches and pages all audit history with exact actors, dates, details, and access controls', async () => {
   vi.stubEnv('HR_DATABASE_PATH', ':memory:');
   vi.stubEnv('HR_ADMIN_EMAIL', 'audit@test.local');
@@ -26,28 +25,30 @@ it('searches and pages all audit history with exact actors, dates, details, and 
       .expect(201);
     const headers = { Authorization: `Bearer ${login.body.token}` };
     const audit = app.get(AuditService);
-    const actor = app.get(AuthService).authenticate(login.body.token);
+    const actor = await app.get(AuthService).authenticate(login.body.token);
     const other: Actor = { ...actor, id: randomUUID() };
-    app
+    await app
       .get(DatabaseService)
       .db.prepare(
-        'INSERT INTO users SELECT ?, ?, name, role, employee_id, active, password_hash FROM users WHERE id = ?',
+        'INSERT INTO users(id,email,name,role,employee_id,active,password_hash) SELECT ?, ?, name, role, employee_id, active, password_hash FROM users WHERE id = ?',
       )
       .run(other.id, 'other-audit@test.local', actor.id);
     const ids: string[] = [];
-    for (let i = 0; i < 121; i++) {
-      audit.record(
-        i % 2 ? other : actor,
-        'employee.updated',
-        'department Sales',
-        { value: i },
-        { value: i + 1, name: 'Trackable employee' },
-        'Correction',
-      );
-      ids.unshift(
-        audit.auditHistory(actor, 'department Sales')[0].id as string,
-      );
-    }
+    await app.get(DatabaseService).transaction(async () => {
+      for (let i = 0; i < 121; i++) {
+        await audit.record(
+          i % 2 ? other : actor,
+          'employee.updated',
+          'department Sales',
+          { value: i },
+          { value: i + 1, name: 'Trackable employee' },
+          'Correction',
+        );
+        ids.unshift(
+          (await audit.auditHistory(actor, 'department Sales'))[0].id as string,
+        );
+      }
+    });
     // A new insertion after page one must not shift subsequent cursor pages.
     const found: string[] = [];
     let before = '';
@@ -61,7 +62,13 @@ it('searches and pages all audit history with exact actors, dates, details, and 
       found.push(...response.body.map((row: { id: string }) => row.id));
       before = response.body.at(-1).id;
       if (page === 0)
-        audit.record(actor, 'employee.updated', 'department Sales', null, null);
+        await audit.record(
+          actor,
+          'employee.updated',
+          'department Sales',
+          null,
+          null,
+        );
     }
     expect(found).toEqual(ids);
     expect(new Set(found).size).toBe(121);
@@ -80,14 +87,12 @@ it('searches and pages all audit history with exact actors, dates, details, and 
     expect(filtered.body[0].before).toHaveProperty('value');
     expect(filtered.body[0].reason).toBe('Correction');
     const db = app.get(DatabaseService).db;
-    db.prepare('UPDATE audit SET at = ? WHERE id = ?').run(
-      '2026-10-14T23:59:59.999Z',
-      ids[0],
-    );
-    db.prepare('UPDATE audit SET at = ? WHERE id = ?').run(
-      '2026-10-15T00:00:00.000Z',
-      ids[1],
-    );
+    await db
+      .prepare('UPDATE audit SET at = ? WHERE id = ?')
+      .run('2026-10-14T23:59:59.999Z', ids[0]);
+    await db
+      .prepare('UPDATE audit SET at = ? WHERE id = ?')
+      .run('2026-10-15T00:00:00.000Z', ids[1]);
     const dated = await request(http)
       .get('/api/audit?from=2026-10-14&to=2026-10-14&limit=100')
       .set(headers)
@@ -107,16 +112,20 @@ it('searches and pages all audit history with exact actors, dates, details, and 
       await request(http).get(`/api/audit?${query}`).set(headers).expect(400);
     }
     await request(http).get('/api/audit').expect(401);
-    db.prepare("UPDATE users SET role = 'employee' WHERE id = ?").run(actor.id);
+    await db
+      .prepare("UPDATE users SET role = 'employee' WHERE id = ?")
+      .run(actor.id);
     await request(http).get('/api/audit').set(headers).expect(403);
-    db.prepare("UPDATE users SET role = 'admin' WHERE id = ?").run(actor.id);
+    await db
+      .prepare("UPDATE users SET role = 'admin' WHERE id = ?")
+      .run(actor.id);
     expect(
-      audit
-        .auditHistory(actor, actor.id)
-        .some((row) => row.action === 'account.signed_in'),
+      (await audit.auditHistory(actor, actor.id)).some(
+        (row) => row.action === 'account.signed_in',
+      ),
     ).toBe(true);
     await request(http).post('/api/auth/logout').set(headers).expect(201);
-    const authLogs = audit.auditHistory(actor, actor.id);
+    const authLogs = await audit.auditHistory(actor, actor.id);
     expect(authLogs[0].action).toBe('account.signed_out');
     expect(JSON.stringify(authLogs)).not.toContain(login.body.token);
     expect(JSON.stringify(authLogs)).not.toContain(

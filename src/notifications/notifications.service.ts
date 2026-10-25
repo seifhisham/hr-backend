@@ -9,7 +9,6 @@ import type { Actor } from '../common/types/actor.type.js';
 import { DatabaseService } from '../database/database.service.js';
 import type { Employee } from '../employees/types/employee.type.js';
 import type { EmployeeRequest } from '../requests/types/employee-request.type.js';
-
 export type Notification = {
   id: string;
   type:
@@ -26,30 +25,35 @@ export type Notification = {
   requestId?: string;
   attendanceId?: string;
 };
-
 @Injectable()
 export class NotificationsService {
   constructor(
-    @Inject(DatabaseService) private readonly store: DatabaseService,
-    @Inject(RequestsService) private readonly requests: RequestsService,
+    @Inject(DatabaseService)
+    private readonly store: DatabaseService,
+    @Inject(RequestsService)
+    private readonly requests: RequestsService,
   ) {}
-
-  list(actor: Actor): { items: Notification[]; unreadCount: number } {
+  async list(actor: Actor): Promise<{
+    items: Notification[];
+    unreadCount: number;
+  }> {
     const db = this.store.db;
     const items: Notification[] = [];
     // Decisions already have a durable, transactional audit event. Use its ID
     // so repeated reads never create duplicate notifications.
     if (actor.employeeId) {
-      for (const row of db
-        .prepare(
-          `
+      for (const row of await this.store.personal(async () =>
+        db
+          .prepare(
+            `
         SELECT id, at, action, actor_name, reason, after_data FROM audit
         WHERE action IN ('request.approved', 'request.rejected', 'request.reopened', 'request.manager_reviewed')
-          AND json_extract(after_data, '$.employeeId') = ?
-        ORDER BY rowid DESC LIMIT 100
+          AND (after_data::jsonb->>'employeeId') = ?
+        ORDER BY row_order DESC LIMIT 100
       `,
-        )
-        .all(actor.employeeId)) {
+          )
+          .all(actor.employeeId),
+      )) {
         const request = JSON.parse(row.after_data as string) as EmployeeRequest;
         const reopened = row.action === 'request.reopened';
         const managerReviewed = row.action === 'request.manager_reviewed';
@@ -75,15 +79,15 @@ export class NotificationsService {
     {
       const privileged = actor.role === 'hr' || actor.role === 'admin';
       const profiles = new Map<string, Employee>();
-      for (const row of db
+      for (const row of await db
         .prepare(
           `SELECT r.data, (SELECT id FROM audit WHERE record_id = r.id
-          AND action IN ('request.submitted', 'request.reopened', 'request.manager_reviewed', 'request.manager_review_reset') ORDER BY rowid DESC LIMIT 1) AS event_id
+          AND action IN ('request.submitted', 'request.reopened', 'request.manager_reviewed', 'request.manager_review_reset') ORDER BY row_order DESC LIMIT 1) AS event_id
           FROM employee_requests r WHERE r.status = 'pending'
-          ${privileged ? '' : "AND r.employee_id IN (SELECT id FROM employees WHERE json_extract(data, '$.managerId') = ?)"}`,
+          ${privileged ? '' : "AND r.employee_id IN (SELECT id FROM employees WHERE (data::jsonb->>'managerId') = ?)"}`,
         )
         .all(...(privileged ? [] : [actor.employeeId]))) {
-        const request = this.requests.workflow(
+        const request = await this.requests.workflow(
           JSON.parse(row.data as string) as EmployeeRequest,
           profiles,
         );
@@ -120,7 +124,7 @@ export class NotificationsService {
       }
     }
     if (actor.role === 'hr' || actor.role === 'admin') {
-      for (const row of db
+      for (const row of await db
         .prepare(
           `
         SELECT a.*, e.data AS employee_data FROM attendance a
@@ -144,12 +148,13 @@ export class NotificationsService {
       }
     }
     const reads = new Map(
-      db
-        .prepare(
-          'SELECT notification_id, read_at FROM notification_reads WHERE user_id = ?',
-        )
-        .all(actor.id)
-        .map((row) => [row.notification_id as string, row.read_at as string]),
+      (
+        await db
+          .prepare(
+            'SELECT notification_id, read_at FROM notification_reads WHERE user_id = ?',
+          )
+          .all(actor.id)
+      ).map((row) => [row.notification_id as string, row.read_at as string]),
     );
     for (const item of items) item.readAt = reads.get(item.id) ?? null;
     items.sort(
@@ -158,14 +163,13 @@ export class NotificationsService {
     );
     return { items, unreadCount: items.filter((item) => !item.readAt).length };
   }
-
-  markRead(actor: Actor, id: string) {
-    const item = this.list(actor).items.find((item) => item.id === id);
+  async markRead(actor: Actor, id: string) {
+    const item = (await this.list(actor)).items.find((item) => item.id === id);
     if (!item) throw new NotFoundException('Notification not found');
     const readAt = item.readAt ?? new Date().toISOString();
-    this.store.db
+    await this.store.db
       .prepare(
-        'INSERT OR IGNORE INTO notification_reads (user_id, notification_id, read_at) VALUES (?, ?, ?)',
+        'INSERT INTO notification_reads (user_id, notification_id, read_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING',
       )
       .run(actor.id, id, readAt);
     return { ...item, readAt };

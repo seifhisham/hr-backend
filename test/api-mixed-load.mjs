@@ -6,11 +6,9 @@ import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { DatabaseSync } from 'node:sqlite';
+import { createLoadDatabase } from './postgres-load-fixture.mjs';
 import sharp from 'sharp';
-
 const directory = await mkdtemp(join(tmpdir(), 'hr-mixed-load-'));
-const databasePath = join(directory, 'hr.sqlite');
 const password = randomBytes(24).toString('hex');
 const report = {
   complete: false,
@@ -20,6 +18,7 @@ const report = {
   results: [],
 };
 let child;
+let fixture;
 async function stop() {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
   const stopped = new Promise((done) => child.once('exit', done));
@@ -30,13 +29,14 @@ async function stop() {
   clearTimeout(timer);
 }
 try {
+  fixture = await createLoadDatabase();
   child = fork(resolve('test/api-performance.mjs'), ['--server'], {
     execArgv: [],
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
     env: {
       ...process.env,
       NODE_ENV: 'production',
-      HR_DATABASE_PATH: databasePath,
+      ...fixture.env,
       HR_ADMIN_EMAIL: 'mixed@test.local',
       HR_ADMIN_PASSWORD: password,
       HR_READ_CACHE: 'true',
@@ -287,28 +287,41 @@ try {
   }
   await stop();
   child = undefined;
-  const db = new DatabaseSync(databasePath);
+  const db = fixture.db;
   try {
     assert.equal(
-      db
-        .prepare(
-          'SELECT COUNT(*) AS count FROM attendance WHERE employee_id IN (SELECT value FROM json_each(?)) AND check_out IS NOT NULL AND check_out >= check_in',
-        )
-        .get(JSON.stringify(employees.map((employee) => employee.id))).count,
+      (
+        await db
+          .prepare(
+            'SELECT COUNT(*) AS count FROM attendance WHERE employee_id IN (SELECT value FROM jsonb_array_elements_text(?::jsonb)) AND check_out IS NOT NULL AND check_out >= check_in',
+          )
+          .get(JSON.stringify(employees.map((employee) => employee.id)))
+      ).count,
       30,
     );
     assert.equal(
-      db.prepare('SELECT COUNT(*) AS count FROM attendance_evidence').get()
-        .count,
+      (
+        await db
+          .prepare('SELECT COUNT(*) AS count FROM attendance_evidence')
+          .get()
+      ).count,
       60,
     );
     assert.equal(
-      db.prepare('SELECT COUNT(*) AS count FROM payroll_runs').get().count,
+      (await db.prepare('SELECT COUNT(*) AS count FROM payroll_runs').get())
+        .count,
       0,
     );
-    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+    assert.deepEqual(
+      await db
+        .prepare(
+          "SELECT conname FROM pg_constraint WHERE connamespace='public'::regnamespace AND contype='f' AND NOT convalidated",
+        )
+        .all(),
+      [],
+    );
   } finally {
-    db.close();
+    await db.close();
   }
   report.complete = true;
   report.verification = {
@@ -330,6 +343,7 @@ try {
   try {
     await stop();
   } finally {
+    await fixture?.close();
     assert.equal(dirname(directory), resolve(tmpdir()));
     assert.ok(directory.startsWith(join(resolve(tmpdir()), 'hr-mixed-load-')));
     await rm(directory, {

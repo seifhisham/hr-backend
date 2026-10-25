@@ -7,6 +7,9 @@ export default defineConfig({
   plugins: [tsconfigPaths()],
   test: {
     globals: true,
+    setupFiles: ['./test/postgres.setup.ts'],
+    fileParallelism: false,
+    hookTimeout: 30000,
     root: './',
     include: ['**/*.spec.ts'],
   },
