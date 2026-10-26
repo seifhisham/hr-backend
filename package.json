@@ -28,7 +28,8 @@
     "pg:migrate": "npm run build && node scripts/postgres.mjs migrate",
     "pg:runtime-role": "npm run build && node scripts/postgres.mjs runtime-role",
     "pg:import-sqlite": "npm run build && node scripts/postgres.mjs import-sqlite",
-    "owner:bootstrap": "npm run build && node scripts/owner-bootstrap.mjs"
+    "owner:bootstrap": "npm run build && node scripts/owner-bootstrap.mjs",
+    "owner:setup": "npm run build && node scripts/owner-local.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",

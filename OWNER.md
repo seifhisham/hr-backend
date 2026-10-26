@@ -4,6 +4,14 @@ Migration 4 adds separate platform accounts, sessions, audit, setup state and in
 
 ## Initial owner setup
 
+For this local Windows workspace, with dependencies installed and the local PostgreSQL container running, use one command from `C:\work\hr-system`:
+
+```powershell
+npm --prefix hr-backend run owner:setup
+```
+
+It builds the backend, loads the existing infrastructure settings from `hr-backend/.env` and `.tmp/postgres-foundation.env`, starts the backend/dashboard if needed, and opens the interactive owner wizard at `http://localhost:3003`. Existing encryption keys are preserved. It refuses remote database connections and inconsistent keys. It never resets data or applies migrations automatically. Setup links and background-service logs are saved in the ignored `.tmp/owner-local/` folder. Services started by this command stay running after the wizard exits. Complete password/authenticator enrollment through the displayed private browser link. An enrolled owner cannot be replaced.
+
 The first owner is bootstrapped explicitly with migration credentials, never by starting the application. Configure `HR_OWNER_ENCRYPTION_KEY` in the backend environment: 32 cryptographically random bytes encoded as 64 hexadecimal characters. Keep this key stable and back it up privately with the database. It encrypts authenticator secrets and recoverable invitation retry tokens; changing or losing it prevents decrypting existing secrets. No key is sent to the frontend.
 
 For the production Docker stack, complete the database/server setup in the [deployment guide](../docs/operations/PRODUCTION_DEPLOYMENT.md), then run this from the project root in an interactive SSH terminal:
