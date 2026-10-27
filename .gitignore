@@ -45,6 +45,11 @@ lerna-debug.log*
 .env.production.local
 .env.local
 
+# Firebase credentials are transferred separately to the server.
+/.secrets/
+*-firebase-adminsdk-*.json
+hodour-fcm-adc.json
+
 # temp directory
 .temp
 .tmp

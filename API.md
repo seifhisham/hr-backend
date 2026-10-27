@@ -1,5 +1,13 @@
 # HR REST API
 
+Android push: `POST /api/push/devices` and `DELETE /api/push/devices/:deviceId`;
+see [exact schemas, responses, errors and mobile lifecycle contract](PUSH.md#api-contract).
+
+The notification inbox also includes `employee-checked-in` and `employee-checked-out`
+for the current direct manager (including automatic check-out). Each has a stable
+audit-event `id`, `attendanceId`, `title`, `message`, `createdAt`, and nullable `readAt`.
+Existing notification GET/read endpoints and generic Android push payloads apply.
+
 Platform-owner login/MFA, company onboarding and migration 4: see [owner API and runbook](OWNER.md).
 
 Company/branch permissions, migration 3 and dashboard administration: see [branch API and safe upgrade](BRANCHES.md).

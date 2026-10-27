@@ -1,3 +1,7 @@
+import {
+  PUSH_TABLES,
+  PUSH_FUNCTIONS,
+} from '../src/database/postgres/push-schema.js';
 import { BRANCH_LIMIT_FUNCTIONS } from '../src/database/postgres/branch-limits-schema.js';
 import { OWNER_FUNCTIONS } from '../src/database/postgres/owner-schema.js';
 import { BRANCH_FUNCTIONS } from '../src/database/postgres/branch-schema.js';
@@ -117,7 +121,7 @@ beforeAll(async () => {
   await admin.query(sql.rows[0].sql);
   await fixture.query(`GRANT USAGE ON SCHEMA public TO ${role}`);
   await fixture.query(
-    `GRANT SELECT,INSERT,UPDATE,DELETE ON companies,${TENANT_TABLES.join(',')} TO ${role}`,
+    `GRANT SELECT,INSERT,UPDATE,DELETE ON companies,${[...TENANT_TABLES, ...PUSH_TABLES].join(',')} TO ${role}`,
   );
   await fixture.query(
     `GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO ${role}`,
@@ -127,6 +131,7 @@ beforeAll(async () => {
     ...BRANCH_FUNCTIONS,
     ...OWNER_FUNCTIONS,
     ...BRANCH_LIMIT_FUNCTIONS,
+    ...PUSH_FUNCTIONS,
   ])
     await fixture.query(`GRANT EXECUTE ON FUNCTION ${signature} TO ${role}`);
   url.username = role;
@@ -136,7 +141,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await fixture.query(
-    `TRUNCATE platform_owners,platform_login_limits,platform_audit,companies,${TENANT_TABLES.join(',')} RESTART IDENTITY CASCADE`,
+    `TRUNCATE platform_owners,platform_login_limits,platform_audit,companies,${[...TENANT_TABLES, ...PUSH_TABLES].join(',')} RESTART IDENTITY CASCADE`,
   );
   await fixture.query(
     `INSERT INTO companies(id,workspace_code,name,timezone,status)

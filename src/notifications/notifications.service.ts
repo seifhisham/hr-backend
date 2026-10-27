@@ -17,6 +17,8 @@ export type Notification = {
     | 'request-decided'
     | 'request-reopened'
     | 'pending-request'
+    | 'employee-checked-in'
+    | 'employee-checked-out'
     | 'missing-check-out';
   title: string;
   message: string;
@@ -39,6 +41,35 @@ export class NotificationsService {
   }> {
     const db = this.store.db;
     const items: Notification[] = [];
+    if (actor.employeeId && ['manager', 'hr', 'admin'].includes(actor.role)) {
+      for (const row of await db
+        .prepare(
+          `
+        SELECT a.id,a.at,a.action,a.record_id,e.data::jsonb->>'name' AS employee_name
+        FROM audit a JOIN attendance t ON t.id=a.record_id
+        JOIN employees e ON e.id=t.employee_id
+        JOIN employees m ON m.id=?
+        WHERE a.action IN ('attendance.checked_in','attendance.checked_out','attendance.auto_checked_out')
+          AND e.data::jsonb->>'managerId'=? AND e.id<>?
+          AND m.data::jsonb->>'active'='true'
+          AND m.data::jsonb->>'role' IN ('manager','hr','admin')
+        ORDER BY a.row_order DESC LIMIT 100
+      `,
+        )
+        .all(actor.employeeId, actor.employeeId, actor.employeeId)) {
+        const checkedIn = row.action === 'attendance.checked_in';
+        const action = checkedIn ? 'checked in' : 'checked out';
+        items.push({
+          id: row.id as string,
+          type: checkedIn ? 'employee-checked-in' : 'employee-checked-out',
+          title: `Direct report ${action}`,
+          message: `${row.employee_name as string} ${action}`,
+          createdAt: row.at as string,
+          readAt: null,
+          attendanceId: row.record_id as string,
+        });
+      }
+    }
     // Decisions already have a durable, transactional audit event. Use its ID
     // so repeated reads never create duplicate notifications.
     if (actor.employeeId) {

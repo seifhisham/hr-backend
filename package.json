@@ -36,6 +36,7 @@
     "@nestjs/core": "^12.0.1",
     "@nestjs/observe": "^0.3.0",
     "@nestjs/platform-express": "^12.0.1",
+    "firebase-admin": "^14.5.0",
     "geolib": "^3.3.14",
     "pg": "^8.23.1",
     "reflect-metadata": "^0.2.2",

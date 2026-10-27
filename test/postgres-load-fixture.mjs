@@ -1,3 +1,7 @@
+import {
+  PUSH_TABLES,
+  PUSH_FUNCTIONS,
+} from '../dist/database/postgres/push-schema.js';
 import { BRANCH_LIMIT_FUNCTIONS } from '../dist/database/postgres/branch-limits-schema.js';
 import { OWNER_FUNCTIONS } from '../dist/database/postgres/owner-schema.js';
 import { BRANCH_FUNCTIONS } from '../dist/database/postgres/branch-schema.js';
@@ -72,7 +76,7 @@ export async function createLoadDatabase() {
     await admin.query(sql.rows[0].sql);
     await owner.query(`GRANT USAGE ON SCHEMA public TO ${role}`);
     await owner.query(
-      `GRANT SELECT,INSERT,UPDATE,DELETE ON companies,${TENANT_TABLES.join(',')} TO ${role}`,
+      `GRANT SELECT,INSERT,UPDATE,DELETE ON companies,${[...TENANT_TABLES, ...PUSH_TABLES].join(',')} TO ${role}`,
     );
     await owner.query(
       `GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO ${role}`,
@@ -81,7 +85,8 @@ export async function createLoadDatabase() {
       ...RUNTIME_FUNCTIONS,
       ...BRANCH_FUNCTIONS,
       ...OWNER_FUNCTIONS,
-    ...BRANCH_LIMIT_FUNCTIONS,
+      ...BRANCH_LIMIT_FUNCTIONS,
+      ...PUSH_FUNCTIONS,
     ])
       await owner.query(`GRANT EXECUTE ON FUNCTION ${signature} TO ${role}`);
     await owner.query(

@@ -1,5 +1,7 @@
 # HR Backend
 
+Hodour Android Firebase push registration, migration 6, ADC deployment setup and mobile contract: [PUSH.md](PUSH.md).
+
 NestJS REST API for the HR dashboard and the later Flutter application. Uses PostgreSQL, Zod request validation, and session authentication. See [API.md](API.md) for endpoint contracts and [the project BRD](../docs/requirements/BRD.md) for business requirements.
 
 ## Backend read cache

@@ -1,3 +1,7 @@
+import {
+  PUSH_TABLES,
+  PUSH_FUNCTIONS,
+} from '../dist/database/postgres/push-schema.js';
 import { BRANCH_LIMIT_FUNCTIONS } from '../dist/database/postgres/branch-limits-schema.js';
 import { parseArgs } from 'node:util';
 import { Pool } from 'pg';
@@ -51,7 +55,7 @@ try {
         const { TENANT_TABLES } =
           await import('../dist/database/postgres/schema.js');
         await client.query(
-          `GRANT SELECT, INSERT, UPDATE, DELETE ON companies, ${TENANT_TABLES.join(',')} TO hr_runtime`,
+          `GRANT SELECT, INSERT, UPDATE, DELETE ON companies, ${[...TENANT_TABLES, ...PUSH_TABLES].join(',')} TO hr_runtime`,
         );
         await client.query(
           'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO hr_runtime',
@@ -66,7 +70,8 @@ try {
           ...RUNTIME_FUNCTIONS,
           ...BRANCH_FUNCTIONS,
           ...OWNER_FUNCTIONS,
-    ...BRANCH_LIMIT_FUNCTIONS,
+          ...BRANCH_LIMIT_FUNCTIONS,
+          ...PUSH_FUNCTIONS,
         ])
           await client.query(
             `GRANT EXECUTE ON FUNCTION ${signature} TO hr_runtime`,

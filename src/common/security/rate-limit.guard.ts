@@ -11,6 +11,7 @@ import type { Response } from 'express';
 import type { AuthRequest } from '../../auth/types/auth-request.type.js';
 
 export const RATE_LIMITS = {
+  push: { requests: 30, windowMs: 60_000 },
   geocoding: { requests: 10, windowMs: 60_000 },
   reports: { requests: 60, windowMs: 60_000 },
   exports: { requests: 10, windowMs: 60_000 },

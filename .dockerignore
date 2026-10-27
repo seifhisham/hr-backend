@@ -3,6 +3,9 @@ dist
 data
 .git
 .env*
+.secrets
+*-firebase-adminsdk-*.json
+hodour-fcm-adc.json
 coverage
 *.log
 .tmp

@@ -1,3 +1,7 @@
+import {
+  PUSH_TABLES,
+  PUSH_FUNCTIONS,
+} from '../src/database/postgres/push-schema.js';
 import { BRANCH_LIMIT_FUNCTIONS } from '../src/database/postgres/branch-limits-schema.js';
 import { OWNER_FUNCTIONS } from '../src/database/postgres/owner-schema.js';
 import { BRANCH_FUNCTIONS } from '../src/database/postgres/branch-schema.js';
@@ -59,7 +63,7 @@ beforeAll(async () => {
   await admin.query(sql.rows[0].sql);
   await migration.query(`GRANT USAGE ON SCHEMA public TO ${role}`);
   await migration.query(
-    `GRANT SELECT,INSERT,UPDATE,DELETE ON companies,${TENANT_TABLES.join(',')} TO ${role}`,
+    `GRANT SELECT,INSERT,UPDATE,DELETE ON companies,${[...TENANT_TABLES, ...PUSH_TABLES].join(',')} TO ${role}`,
   );
   await migration.query(
     `GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO ${role}`,
@@ -68,6 +72,7 @@ beforeAll(async () => {
     ...BRANCH_FUNCTIONS,
     ...OWNER_FUNCTIONS,
     ...BRANCH_LIMIT_FUNCTIONS,
+    ...PUSH_FUNCTIONS,
   ])
     await migration.query(`GRANT EXECUTE ON FUNCTION ${signature} TO ${role}`);
   url.username = role;
@@ -79,7 +84,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await migration.query(
-    `TRUNCATE companies,${TENANT_TABLES.join(',')} RESTART IDENTITY CASCADE`,
+    `TRUNCATE companies,${[...TENANT_TABLES, ...PUSH_TABLES].join(',')} RESTART IDENTITY CASCADE`,
   );
 });
 
@@ -146,9 +151,11 @@ it('enables and forces RLS on every company table under the actual restricted ro
   const tables = await migration.query(
     `SELECT relname,relrowsecurity,relforcerowsecurity
     FROM pg_class WHERE relnamespace='public'::regnamespace AND relname=ANY($1)`,
-    [['companies', ...TENANT_TABLES]],
+    [['companies', ...TENANT_TABLES, ...PUSH_TABLES]],
   );
-  expect(tables.rows).toHaveLength(TENANT_TABLES.length + 1);
+  expect(tables.rows).toHaveLength(
+    TENANT_TABLES.length + PUSH_TABLES.length + 1,
+  );
   expect(
     tables.rows.every((row) => row.relrowsecurity && row.relforcerowsecurity),
   ).toBe(true);

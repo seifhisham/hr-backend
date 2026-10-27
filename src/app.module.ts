@@ -1,4 +1,5 @@
 import { BranchesModule } from './branches/branches.module.js';
+import { PushModule } from './push/push.module.js';
 import { OwnerModule } from './owner/owner.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { DepartmentsModule } from './departments/departments.module.js';
@@ -22,6 +23,7 @@ import { SchedulesModule } from './schedules/schedules.module.js';
 import { SalesModule } from './sales/sales.module.js';
 @Module({
   imports: [
+    PushModule,
     OwnerModule,
     DatabaseModule,
     BranchesModule,

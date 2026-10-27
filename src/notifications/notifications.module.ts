@@ -8,5 +8,6 @@ import { NotificationsService } from './notifications.service.js';
   imports: [DatabaseModule, RequestsModule],
   controllers: [NotificationsController],
   providers: [NotificationsService],
+  exports: [NotificationsService],
 })
 export class NotificationsModule {}
