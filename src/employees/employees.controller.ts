@@ -14,6 +14,8 @@ import { parse } from '../common/validation/parse.js';
 import { ZodValidationPipe } from '../common/validation/zod-validation.pipe.js';
 import { employeeSchema, type SaveEmployeeDto } from './dto/employee.dto.js';
 import { EmployeesService } from './employees.service.js';
+import { importSchema, type EmployeeImport } from './employee-import.js';
+import { RateLimit } from '../common/security/rate-limit.guard.js';
 @Controller('api/employees')
 export class EmployeesController {
   constructor(
@@ -54,6 +56,14 @@ export class EmployeesController {
     body: SaveEmployeeDto,
   ) {
     return await this.employeesService.saveEmployee(req.actor, body);
+  }
+  @Post('import')
+  @RateLimit('exports')
+  async importEmployees(
+    @Req() req: AuthRequest,
+    @Body(new ZodValidationPipe(importSchema)) body: EmployeeImport,
+  ) {
+    return await this.employeesService.importEmployees(req.actor, body);
   }
   @Patch(':id')
   async updateEmployee(

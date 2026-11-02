@@ -3,11 +3,12 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { AuditService } from '../audit/audit.service.js';
 import { passwordHash } from '../common/security/credentials.js';
 import { requireHr } from '../common/security/permissions.js';
@@ -16,6 +17,8 @@ import { DatabaseService } from '../database/database.service.js';
 import { SchedulesService } from '../schedules/schedules.service.js';
 import type { SaveEmployeeDto } from './dto/employee.dto.js';
 import type { Employee } from './types/employee.type.js';
+import { parseEmployeeCsv, type EmployeeImport } from './employee-import.js';
+import { IMPORT_PASSWORD_WORDS } from './import-password-words.js';
 @Injectable()
 export class EmployeesService {
   constructor(
@@ -28,6 +31,78 @@ export class EmployeesService {
   ) {}
   private get db() {
     return this.store.db;
+  }
+  async importEmployees(actor: Actor, input: EmployeeImport) {
+    requireHr(actor);
+    if (
+      !(await this.db
+        .prepare('SELECT id FROM branches WHERE id=? AND active')
+        .get(input.branchId))
+    )
+      throw new BadRequestException('Select an active permitted branch');
+    await this.schedulesService.schedule(input.scheduleId);
+    const rows = parseEmployeeCsv(input);
+    const existing = await this.db
+      .prepare('SELECT code,email FROM employees')
+      .all();
+    const ids = new Set(existing.map((row) => String(row.code)));
+    const emails = new Set(
+      existing.map((row) => String(row.email).toLowerCase()),
+    );
+    for (const row of rows) {
+      if (!row.employee) continue;
+      const employee = row.employee;
+      if (ids.has(employee.nationalId) || emails.has(employee.email)) {
+        row.status = 'skipped';
+        row.message =
+          'National ID or email already exists or is repeated in this CSV. No record was changed.';
+        continue;
+      }
+      try {
+        if (actor.role !== 'admin' && ['hr', 'admin'].includes(employee.role))
+          throw new ForbiddenException(
+            'Only administrators manage HR and administrator accounts',
+          );
+        if (
+          employee.branchId !== input.branchId &&
+          !(await this.db
+            .prepare('SELECT id FROM branches WHERE id=? AND active')
+            .get(employee.branchId!))
+        )
+          throw new BadRequestException('Select an active permitted branch');
+        if (employee.scheduleId !== input.scheduleId)
+          await this.schedulesService.schedule(employee.scheduleId);
+      } catch (error) {
+        row.status = 'invalid';
+        row.message =
+          error instanceof HttpException && error.getStatus() < 500
+            ? error.message
+            : 'Unable to validate employee assignments';
+        continue;
+      }
+      ids.add(employee.nationalId);
+      emails.add(employee.email);
+      if (input.preview) continue;
+      const password = [
+        ...Array.from(
+          { length: 4 },
+          () => IMPORT_PASSWORD_WORDS[randomInt(IMPORT_PASSWORD_WORDS.length)],
+        ),
+        String(randomInt(1000, 10000)),
+      ].join('-');
+      try {
+        await this.saveEmployee(actor, { ...employee, password });
+        row.status = 'created';
+        row.password = password;
+      } catch (error) {
+        row.status = 'failed';
+        row.message =
+          error instanceof HttpException && error.getStatus() < 500
+            ? error.message
+            : 'Unable to create employee. Check the row and try again.';
+      }
+    }
+    return rows;
   }
   async employeeActor(actor: Actor) {
     if (!actor.employeeId)
