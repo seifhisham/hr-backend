@@ -185,6 +185,10 @@ export class AttendanceLocationService
       const now = Date.now();
       if (this.stale(state, now)) this.unavailable(state);
       await this.apply(state, input, now, id);
+      if (await this.approvedMission(id)) {
+        state.outsideSince = null;
+        state.returnBy = null;
+      }
       state.actor = actor;
       await this.save(id, state);
       return await this.view(id);
@@ -257,6 +261,15 @@ export class AttendanceLocationService
         ).toISOString();
     } else this.unavailable(state);
   }
+  private async approvedMission(id: string) {
+    return !!(await this.store.db
+      .prepare(
+        `SELECT 1 FROM attendance a JOIN employee_requests r ON r.employee_id = a.employee_id
+         WHERE a.id = ? AND r.status = 'approved' AND r.data::jsonb->>'type' = 'mission'
+         AND r.data::jsonb->>'from' <= a.work_date AND r.data::jsonb->>'to' >= a.work_date`,
+      )
+      .get(id));
+  }
   async sweep() {
     await this.store.transaction(async () => {
       const now = Date.now();
@@ -267,7 +280,11 @@ export class AttendanceLocationService
         .all();
       for (const row of rows) {
         const state = JSON.parse(row.data as string) as Tracking;
-        if (this.stale(state, now)) this.unavailable(state);
+        if (await this.approvedMission(row.id as string)) {
+          state.outsideSince = null;
+          state.returnBy = null;
+          if (this.stale(state, now)) this.unavailable(state);
+        } else if (this.stale(state, now)) this.unavailable(state);
         else if (
           state.status === 'outside' &&
           state.returnBy &&

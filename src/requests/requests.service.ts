@@ -545,7 +545,9 @@ export class RequestsService {
           before.type === 'forgotten-check-out'
             ? null
             : input.status === 'approved'
-              ? 1
+              ? before.type === 'mission'
+                ? 0
+                : 1
               : 3,
       };
       await this.db

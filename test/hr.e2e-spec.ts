@@ -231,6 +231,81 @@ describe('HR REST API', () => {
       )?.total,
     ).toBe(0);
   });
+  it('cancels an existing departure deadline for an approved mission and excludes legacy mission deductions', async () => {
+    const record = (
+      await submit('/api/attendance/check-in', employeeToken).expect(201)
+    ).body;
+    const mission = (
+      await request(server())
+        .post('/api/requests')
+        .set(auth(employeeToken))
+        .send({
+          type: 'mission',
+          from: '2026-10-04',
+          to: '2026-10-04',
+          reason: 'Working at client office',
+        })
+        .expect(201)
+    ).body;
+    await locationUpdate(record.id).expect(201);
+    vi.setSystemTime(new Date('2026-10-04T07:00:30Z'));
+    expect(
+      (await locationUpdate(record.id).expect(201)).body.returnBy,
+    ).not.toBeNull();
+    const approved = await request(server())
+      .patch(`/api/requests/${mission.id}/decision`)
+      .set(auth(adminToken))
+      .send({ status: 'approved', reason: 'Approved client visit' })
+      .expect(200);
+    expect(approved.body.salaryDeductionDays).toBe(0);
+    // Approval must protect an already-running countdown before another GPS update.
+    await app.get(AttendanceLocationService).sweep();
+    expect(
+      (await app.get(AttendanceLocationService).view(record.id))?.returnBy,
+    ).toBeNull();
+    for (let seconds = 60; seconds <= 360; seconds += 30) {
+      vi.setSystemTime(
+        new Date(Date.parse('2026-10-04T07:00:00Z') + seconds * 1000),
+      );
+      expect(
+        (await locationUpdate(record.id).expect(201)).body.returnBy,
+      ).toBeNull();
+      await app.get(AttendanceLocationService).sweep();
+    }
+    const mine = await request(server())
+      .get('/api/attendance/me')
+      .set(auth(employeeToken))
+      .expect(200);
+    expect(mine.body.records[0].checkOut).toBeNull();
+    await app
+      .get(DatabaseService)
+      .prepare('UPDATE employee_requests SET data = ? WHERE id = ?')
+      .run(
+        JSON.stringify({ ...approved.body, salaryDeductionDays: 1 }),
+        mission.id,
+      );
+    const payroll = await request(server())
+      .get('/api/payroll/run?month=2026-10')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(
+      payroll.body.rows.find(
+        (row: { employeeId: string }) => row.employeeId === employee.id,
+      ).deductionDays,
+    ).toBe(0);
+    // Reopening removes protection and starts a fresh grace period.
+    await request(server())
+      .patch(`/api/requests/${mission.id}/reopen`)
+      .set(auth(adminToken))
+      .send({ reason: 'Review changed mission assignment' })
+      .expect(200);
+    vi.setSystemTime(new Date('2026-10-04T07:06:30Z'));
+    await locationUpdate(record.id).expect(201);
+    vi.setSystemTime(new Date('2026-10-04T07:07:00Z'));
+    expect(
+      (await locationUpdate(record.id).expect(201)).body.returnBy,
+    ).not.toBeNull();
+  });
   it('cancels departure on return and never checks out for unavailable, uncertain or missing location', async () => {
     const record = (
       await submit('/api/attendance/check-in', employeeToken).expect(201)
@@ -2056,7 +2131,7 @@ describe('HR REST API', () => {
       .expect(200);
   });
   it.each(['sick', 'unpaid', 'urgent', 'mission'])(
-    'submits and approves %s requests with the shared salary deduction policy',
+    'submits and approves %s requests with the applicable salary deduction policy',
     async (type) => {
       const created = await request(server())
         .post('/api/requests')
@@ -2073,7 +2148,9 @@ describe('HR REST API', () => {
         .set(auth(adminToken))
         .send({ status: 'approved', reason: 'Reviewed by HR' })
         .expect(200);
-      expect(approved.body.salaryDeductionDays).toBe(1);
+      expect(approved.body.salaryDeductionDays).toBe(
+        type === 'mission' ? 0 : 1,
+      );
       const report = await request(server())
         .get('/api/attendance?from=2026-10-05&to=2026-10-05')
         .set(auth(adminToken))

@@ -222,6 +222,7 @@ export class PayrollService {
     const requestsByEmployee = new Map<string, EmployeeRequest[]>();
     for (const request of requests) {
       if (
+        (request.type === 'mission' && request.status === 'approved') ||
         !request.decidedAt ||
         localTime(new Date(request.decidedAt), timezone).date.slice(0, 7) !==
           month
