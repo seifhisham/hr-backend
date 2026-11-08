@@ -30,13 +30,27 @@ export class FirebaseSender {
     this.messaging = getMessaging(app);
   }
 
-  async send(token: string, notificationId: string, type: string) {
+  async send(
+    token: string,
+    notificationId: string,
+    type: string,
+    preview?: { title: string; message: string },
+  ) {
     if (!this.messaging) throw new Error('Push sender is disabled');
+    const attendancePreview =
+      preview &&
+      [
+        'employee-checked-in',
+        'employee-checked-out',
+        'missing-check-out',
+      ].includes(type);
     await this.messaging.send({
       token,
       notification: {
-        title: 'Hodour',
-        body: 'You have a new notification. Open Hodour to view it.',
+        title: attendancePreview ? preview.title : 'Hodour',
+        body: attendancePreview
+          ? preview.message
+          : 'You have a new notification. Open Hodour to view it.',
       },
       data: { notificationId, type },
       android: {

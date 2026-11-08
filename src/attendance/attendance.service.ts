@@ -278,10 +278,11 @@ export class AttendanceService {
       actor.role === 'hr'
         ? history!.employees
         : actor.role === 'manager'
-          ? await this.employeesService.managedEmployees(actor)
-          : await this.employeesService.employees(actor)
+          ? await this.employeesService.managedEmployees(actor, true)
+          : await this.employeesService.employees(actor, true)
     ).filter(
       (e) =>
+        e.role !== 'admin' &&
         (!filters.employeeId || e.id === filters.employeeId) &&
         (!filters.department || e.department === filters.department),
     );
@@ -453,6 +454,10 @@ export class AttendanceService {
         input.employeeId,
         input.workDate,
       );
+      if (employee.role === 'admin')
+        throw new BadRequestException(
+          'Administrator accounts are exempt from attendance',
+        );
       if (input.workDate < employee.startDate)
         throw new BadRequestException(
           'Attendance cannot start before employment begins',

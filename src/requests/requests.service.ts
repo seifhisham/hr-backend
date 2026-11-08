@@ -542,7 +542,9 @@ export class RequestsService {
         decidedBy: actor.name,
         decisionReason: input.reason,
         salaryDeductionDays:
-          before.type === 'forgotten-check-out'
+          before.type === 'forgotten-check-out' ||
+          (await this.employeesService.workflowEmployee(before.employeeId))
+            .role === 'admin'
             ? null
             : input.status === 'approved'
               ? before.type === 'mission'

@@ -40,6 +40,7 @@ export class AuthController {
       body.email,
       body.password,
       body.workspace,
+      body.persistent,
     );
     res.cookie(SESSION_COOKIE, token, {
       httpOnly: true,

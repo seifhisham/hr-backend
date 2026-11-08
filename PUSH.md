@@ -184,7 +184,9 @@ The recipient must be the employee's current direct manager, with an active
 manager/HR/admin profile; HR branch grants still apply. The latest 100 eligible
 attendance audit events are included, with stable audit IDs and normal read tracking.
 Reassignment removes the former manager's eligibility and exposes that history to
-the new manager. Push text stays generic; employee names appear only in the inbox.
+the new manager. Attendance push previews show the inbox title and message, including
+the employee name for check-in/check-out and the employee name, work date and timezone
+for missing check-out. Request push previews retain generic text.
 No HR workflow calls Firebase, and an HR commit never depends on successful push.
 
 Every ten seconds, active companies/devices are scanned. Unread currently eligible
@@ -262,8 +264,12 @@ foreground local alerts by `notificationId`.
    installation UUID with the latest registration token. Do not issue old-account POSTs
    afterward. A delayed old DELETE/logout cannot remove the newly registered binding.
 
-Payload: standard `notification: {title, body}` with generic text and string-valued
-`data: {notificationId, type}`. Android channel `hodour_push`, restricted package
+Payload: standard `notification: {title, body}` with attendance details for
+`employee-checked-in`, `employee-checked-out` and `missing-check-out`; other types use
+generic text. Attendance details may appear on the lock screen. Flutter foreground
+alerts must display the received notification title/body rather than hardcoded text.
+The payload also includes string-valued `data: {notificationId, type}`.
+Android channel `hodour_push`, restricted package
 `com.wsc.hodour`, one-hour FCM TTL. Keep existing foreground local-notification display
 and Android background notification display. Request Android notification permission
 and create the channel before displaying. Do not display a second background local

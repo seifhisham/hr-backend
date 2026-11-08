@@ -22,6 +22,7 @@ import {
 import type { AuthRequest } from '../auth/types/auth-request.type.js';
 import { parse } from '../common/validation/parse.js';
 import { PayrollService } from './payroll.service.js';
+import { bankDetailsSchema, type BankDetails } from './dto/bank-details.dto.js';
 @Controller('api/payroll')
 export class PayrollController {
   constructor(
@@ -62,6 +63,17 @@ export class PayrollController {
     body: ApprovePayrollDto,
   ) {
     return await this.payrollService.approve(req.actor, body);
+  }
+  @Get('bank-details')
+  async bankDetails(@Req() req: AuthRequest) {
+    return this.payrollService.bankDetails(req.actor);
+  }
+  @Post('bank-details')
+  async saveBankDetails(
+    @Req() req: AuthRequest,
+    @Body(new ZodValidationPipe(bankDetailsSchema)) body: BankDetails,
+  ) {
+    return this.payrollService.saveBankDetails(req.actor, body);
   }
   @RateLimit('reports')
   @Get('deductions')

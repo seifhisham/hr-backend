@@ -78,8 +78,8 @@ export class SalesService {
         )
       ).employees;
     return actor.role === 'manager'
-      ? await this.employees.managedEmployees(actor)
-      : await this.employees.employees(actor);
+      ? await this.employees.managedEmployees(actor, true)
+      : await this.employees.employees(actor, true);
   }
   private async canReview(actor: Actor, employee: Employee, date?: string) {
     if (

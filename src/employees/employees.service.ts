@@ -105,11 +105,15 @@ export class EmployeesService {
     return rows;
   }
   async employeeActor(actor: Actor) {
+    if (actor.role === 'admin')
+      throw new BadRequestException(
+        'Administrator accounts are exempt from employee attendance and requests',
+      );
     if (!actor.employeeId)
       throw new BadRequestException('This account has no employee profile');
     return await this.employee(actor.employeeId);
   }
-  async employees(actor: Actor) {
+  async employees(actor: Actor, includeDeleted = false) {
     requireHr(actor);
     const accounts = new Map(
       (
@@ -126,7 +130,9 @@ export class EmployeesService {
           await this.db
             .prepare('SELECT data FROM employees ORDER BY code')
             .all()
-        ).map((r) => JSON.parse(r.data as string) as Employee),
+        )
+          .map((r) => JSON.parse(r.data as string) as Employee)
+          .filter((employee) => includeDeleted || !employee.deletedAt),
       )
     ).map((employee) => ({
       ...employee,
@@ -143,7 +149,7 @@ export class EmployeesService {
       active: employee.active,
     }));
   }
-  async managedEmployees(actor: Actor) {
+  async managedEmployees(actor: Actor, includeDeleted = false) {
     if (actor.role !== 'manager' || !actor.employeeId)
       throw new ForbiddenException('Manager access required');
     return await this.currentEmployees(
@@ -153,7 +159,9 @@ export class EmployeesService {
             "SELECT data FROM employees WHERE (data::jsonb->>'managerId') = ? ORDER BY code",
           )
           .all(actor.employeeId)
-      ).map((row) => JSON.parse(row.data as string) as Employee),
+      )
+        .map((row) => JSON.parse(row.data as string) as Employee)
+        .filter((employee) => includeDeleted || !employee.deletedAt),
     );
   }
   async employee(id: string): Promise<Employee> {
@@ -266,11 +274,63 @@ export class EmployeesService {
     );
   }
   async profile(actor: Actor) {
+    if (actor.role === 'admin') return null;
     return actor.employeeId ? await this.employee(actor.employeeId) : null;
+  }
+  async deleteEmployee(actor: Actor, id: string) {
+    requireHr(actor);
+    if (id === actor.employeeId)
+      throw new BadRequestException(
+        'You cannot delete your own employee account',
+      );
+    return this.store.transaction(async () => {
+      const row = await this.db
+        .prepare('SELECT data FROM employees WHERE id=? FOR UPDATE')
+        .get(id);
+      if (!row) throw new NotFoundException('Employee not found');
+      const before = JSON.parse(row.data as string) as Employee;
+      if (actor.role !== 'admin' && ['hr', 'admin'].includes(before.role))
+        throw new ForbiddenException(
+          'Only administrators manage HR and administrator accounts',
+        );
+      if (before.deletedAt)
+        return { message: 'Employee deleted; historical records retained' };
+      const after = {
+        ...before,
+        active: false,
+        deletedAt: new Date().toISOString(),
+      };
+      await this.db
+        .prepare('UPDATE employees SET data=? WHERE id=?')
+        .run(JSON.stringify(after), id);
+      await this.db
+        .prepare('UPDATE users SET active=0 WHERE employee_id=?')
+        .run(id);
+      await this.db
+        .prepare(
+          'DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE employee_id=?)',
+        )
+        .run(id);
+      await this.db
+        .prepare(
+          'DELETE FROM hr_branch_grants WHERE user_id IN (SELECT id FROM users WHERE employee_id=?)',
+        )
+        .run(id);
+      await this.auditService.record(
+        actor,
+        'employee.deleted',
+        id,
+        before,
+        after,
+      );
+      return { message: 'Employee deleted; historical records retained' };
+    });
   }
   async saveEmployee(actor: Actor, input: SaveEmployeeDto, id?: string) {
     requireHr(actor);
     const before = id ? await this.employee(id) : null;
+    if (before?.deletedAt)
+      throw new ConflictException('This employee has been deleted');
     const branchId =
       input.branchId ??
       before?.branchId ??
@@ -460,9 +520,9 @@ export class EmployeesService {
           }
         }
         if (before) {
-          await this.db
+          const updatedEmployee = await this.db
             .prepare(
-              'UPDATE employees SET code = ?, email = ?, data = ? WHERE id = ?',
+              "UPDATE employees SET code = ?, email = ?, data = ? WHERE id = ? AND data::jsonb->>'deletedAt' IS NULL",
             )
             .run(
               employee.nationalId,
@@ -470,6 +530,8 @@ export class EmployeesService {
               JSON.stringify(employee),
               employee.id,
             );
+          if (!updatedEmployee.changes)
+            throw new ConflictException('This employee has been deleted');
           await this.db
             .prepare(
               'UPDATE users SET email = ?, name = ?, role = ?, active = ?, password_hash = COALESCE(?, password_hash) WHERE employee_id = ?',

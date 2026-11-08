@@ -167,6 +167,7 @@ export class NotificationsService {
         if (attendanceStatus(record, new Date()) !== 'Missing check-out')
           continue;
         const employee = JSON.parse(row.employee_data as string) as Employee;
+        if (employee.role === 'admin' || employee.deletedAt) continue;
         items.push({
           id: `missing:${record.id}`,
           type: 'missing-check-out',

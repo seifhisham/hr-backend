@@ -30,14 +30,49 @@ Requests and responses use JSON except multipart attendance uploads, JPEG photo 
 { "workspace": "company-code", "email": "employee@company.example", "password": "a-unique-account-password" }
 ```
 
-Returns `{ "user": { "companyId", "id", "name", "email", "role", "employeeId" }, "token": "..." }` and sets an HttpOnly cookie. The Flutter app should retain the token in its platform's secure storage and send it as a bearer token. Browser code uses the cookie and does not persist the token in local storage. Tokens expire after 12 hours; no refresh endpoint is provided in this phase.
+Returns `{ "user": { "companyId", "id", "name", "email", "role", "employeeId" }, "token": "..." }` and sets an HttpOnly cookie. The Flutter app must send the optional boolean `persistent: true` in the login body, retain the token in platform secure storage, and send it as a bearer token. Persistent tokens have no time-based expiry; logout, password changes/resets and access revocation still apply. Omitted or false `persistent` keeps the 12-hour expiry. The browser cookie always expires after 12 hours; browser code uses it and does not persist tokens in local storage. Existing tokens retain their original expiry, so mobile users must sign in once with the new option. No refresh endpoint is needed.
 
 - `GET /auth/me`: user, own employee profile (or null for the bootstrap admin), company settings, and today's date in the company timezone.
 - `POST /auth/logout`: revokes the supplied session.
 - `POST /auth/password`: `{ "currentPassword": "...", "newPassword": "..." }`; requires at least 8 characters for the new password and revokes all sessions. Sign in again afterward.
 - `GET /health`: public health response `{ "status": "ok" }`.
 
+### Bank payroll export
+
+The Payroll tab's **Bank payroll file** action saves bank details and downloads an
+editable `.xlsx` using the supplied Arab Bank column order. HR/admin can import an
+existing bank workbook, review unique name matches, manually assign unmatched
+beneficiaries, or edit the saved fields. Accounts are saved by employee ID; names are
+used only to suggest import matches. The workbook itself is processed locally and
+is not uploaded or published. The reviewed bank fields are saved through REST.
+
+- `GET /payroll/bank-details`: HR/admin only; returns company `settings` and bank
+  `employees` for currently permitted, non-admin employee profiles.
+- `POST /payroll/bank-details`: HR/admin only; saves `{ settings, employees }`.
+  Settings fields: `debitAccount`, `transactionTypeCode`, `purposeCode`, `paymentType`,
+  `purposeOfPayment`. Employee fields: `employeeId`, `beneficiaryName`, `account`,
+  `swift`. Empty strings are allowed for incomplete details; duplicate IDs, invalid
+  account characters, inaccessible employees and admin beneficiaries are rejected.
+  Each submitted employee is checked against current branch access before any write.
+  Other employees' saved details are preserved. Company-scoped settings storage is
+  used; no database migration is needed. Audit events contain employee IDs, not accounts.
+
+Exports use the displayed payroll rows and net salaries, preserving approved payroll
+amounts. HR chooses a fresh payment value date. Currency comes from each payroll row;
+account numbers and references remain text. Missing fields and unavailable/negative
+payment amounts stay blank and are highlighted. The sheet is unprotected and can be
+edited in Excel. Downloading does not approve payroll, initiate payments, or import
+subsequent workbook edits into the system. Review the file before submitting to the bank.
+
 ## Employee Management
+
+Administrator (`admin`) accounts are not attendance/payroll employees, including accounts
+with a legacy linked employee profile. `/auth/me` returns `employee: null` for admins;
+personal attendance and request submissions are unavailable. Admin profiles are excluded
+from attendance reports, missing-check-out alerts and draft payroll; new salary deductions
+are rejected and request decisions do not assign deduction days to admins. Existing
+records and approved payroll snapshots are preserved. HR/manager/employee roles retain
+their existing attendance and deduction rules.
 
 HR/admin access is required.
 
@@ -48,6 +83,18 @@ HR/admin access is required.
 - `POST /employees`: creates the profile and account together.
   Responses include a server-generated `employeeNumber` (`EMP-000001`, `EMP-000002`, etc.). It is unique, read-only, and retained on edits. Existing employees receive numbers automatically at database initialization. Do not include it in POST or PATCH bodies. The internal UUID `id` and the required `nationalId` remain separate identifiers.
 - `PATCH /employees/:id`: replaces editable profile fields; an optional password resets account access. Omit password to retain it.
+- `DELETE /employees/:id`: removes an employee from the directory, marks the retained
+  profile inactive with a server-owned `deletedAt`, disables their account and revokes
+  sessions (including push bindings) and HR grants. Returns 200 with a message; repeating
+  deletion is safe. HR is restricted to permitted branches and cannot delete HR/admin
+  accounts; admins can manage these accounts. Self-deletion is rejected. Attendance,
+  requests, sales, bank details, approved payroll and audit history are retained.
+  Draft payroll keeps the final deletion month and earlier months, and excludes later
+  months; no automatic proration is introduced. Deleted profiles cannot be reactivated
+  through PATCH. IDs/emails remain reserved to preserve historical identity. No database
+  migration is required.
+  `GET /employees?includeDeleted=true` includes retained profiles for authorized
+  historical reporting; the normal directory omits them.
 
 Employee body:
 

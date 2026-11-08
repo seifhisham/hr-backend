@@ -37,7 +37,10 @@ it('initializes once with ADC and sends generic Android notification plus string
     { credential: 'adc-credential', projectId: FIREBASE_PROJECT },
     'hodour-push',
   );
-  await sender.send('registration-token', 'audit-event-id', 'request-decided');
+  await sender.send('registration-token', 'audit-event-id', 'request-decided', {
+    title: 'Request approved',
+    message: 'Private request reason',
+  });
   expect(sdk.send).toHaveBeenCalledWith({
     token: 'registration-token',
     notification: {
@@ -51,6 +54,33 @@ it('initializes once with ADC and sends generic Android notification plus string
       notification: { channelId: 'hodour_push', tag: 'audit-event-id' },
     },
   });
+});
+
+it.each([
+  ['employee-checked-in', 'Direct report checked in', 'Ahmed Ali checked in'],
+  [
+    'employee-checked-out',
+    'Direct report checked out',
+    'Ahmed Ali checked out',
+  ],
+  [
+    'missing-check-out',
+    'Missing check-out',
+    'Ahmed Ali: 2026-11-08 (Africa/Cairo)',
+  ],
+])('includes employee details for %s', async (type, title, message) => {
+  const sender = new FirebaseSender();
+  sender.onModuleInit();
+  await sender.send('registration-token', 'attendance-event', type, {
+    title,
+    message,
+  });
+  expect(sdk.send).toHaveBeenCalledWith(
+    expect.objectContaining({
+      notification: { title, body: message },
+      data: { notificationId: 'attendance-event', type },
+    }),
+  );
 });
 
 it('rejects a wrong/missing Firebase project or conflicting cloud project', () => {

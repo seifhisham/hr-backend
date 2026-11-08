@@ -3922,6 +3922,325 @@ describe('HR REST API', () => {
     expect(csv.text).toContain('National ID');
     expect(csv.text).toContain('00123456789012');
   });
+  it('removes an employee from the directory, revokes access and preserves history', async () => {
+    await request(server())
+      .patch(`/api/employees/${employee.id}`)
+      .set(auth(adminToken))
+      .send({ ...fields(), monthlySalary: 3000 })
+      .expect(200);
+    const draft = await request(server())
+      .get('/api/payroll/run?month=2026-10')
+      .set(auth(adminToken))
+      .expect(200);
+    const approved = await request(server())
+      .post('/api/payroll/approve')
+      .set(auth(adminToken))
+      .send({
+        month: '2026-10',
+        expectedRevision: draft.body.revision,
+        reason: 'Reviewed payroll before employee departure',
+      })
+      .expect(201);
+    const mobile = await request(server())
+      .post('/api/auth/login')
+      .send({
+        email: employee.email,
+        password: employeePassword,
+        persistent: true,
+      })
+      .expect(201);
+    await request(server())
+      .post('/api/push/devices')
+      .set(auth(mobile.body.token))
+      .send({
+        deviceId: randomUUID(),
+        token: 'archive-employee-registration-token',
+        platform: 'android',
+      })
+      .expect(200);
+    const attendance = (
+      await submit('/api/attendance/check-in', employeeToken).expect(201)
+    ).body;
+    const bank = {
+      settings: {
+        debitAccount: '0012345678901',
+        transactionTypeCode: 'BT',
+        purposeCode: '13',
+        paymentType: 'SALARY',
+        purposeOfPayment: 'SALARY',
+      },
+      employees: [
+        {
+          employeeId: employee.id,
+          beneficiaryName: employee.name,
+          account: '0000987654321',
+          swift: 'ARABEGXXXX',
+        },
+      ],
+    };
+    await request(server())
+      .post('/api/payroll/bank-details')
+      .set(auth(adminToken))
+      .send(bank)
+      .expect(201);
+    await request(server())
+      .delete(`/api/employees/${employee.id}`)
+      .set(auth(employeeToken))
+      .expect(403);
+    await request(server())
+      .delete(`/api/employees/${employee.id}`)
+      .set(auth(adminToken))
+      .expect(200);
+    await request(server())
+      .delete(`/api/employees/${employee.id}`)
+      .set(auth(adminToken))
+      .expect(200);
+    const directory = await request(server())
+      .get('/api/employees')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(directory.body.some((row: Employee) => row.id === employee.id)).toBe(
+      false,
+    );
+    const historicalDirectory = await request(server())
+      .get('/api/employees?includeDeleted=true')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(
+      historicalDirectory.body.some(
+        (row: Employee) => row.id === employee.id && !!row.deletedAt,
+      ),
+    ).toBe(true);
+    await request(server())
+      .get('/api/auth/me')
+      .set(auth(employeeToken))
+      .expect(401);
+    await request(server())
+      .post('/api/auth/login')
+      .send({ email: employee.email, password: employeePassword })
+      .expect(401);
+    await request(server())
+      .patch(`/api/employees/${employee.id}`)
+      .set(auth(adminToken))
+      .send(fields())
+      .expect(409);
+    const report = await request(server())
+      .get('/api/attendance?from=2026-10-04&to=2026-10-04')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(
+      report.body.some((row: { id: string }) => row.id === attendance.id),
+    ).toBe(true);
+    const finalPayroll = await request(server())
+      .get('/api/payroll?month=2026-10')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(
+      finalPayroll.body.some(
+        (row: { employeeId: string }) => row.employeeId === employee.id,
+      ),
+    ).toBe(true);
+    expect(finalPayroll.body).toEqual(approved.body.rows);
+    const pushBindings = await app
+      .get(DatabaseService)
+      .prepare(
+        'SELECT device_id FROM push_devices WHERE user_id IN (SELECT id FROM users WHERE employee_id=?)',
+      )
+      .all(employee.id);
+    expect(pushBindings).toHaveLength(0);
+    await request(server())
+      .get('/api/auth/me')
+      .set(auth(mobile.body.token))
+      .expect(401);
+    const futurePayroll = await request(server())
+      .get('/api/payroll?month=2026-11')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(
+      futurePayroll.body.some(
+        (row: { employeeId: string }) => row.employeeId === employee.id,
+      ),
+    ).toBe(false);
+    const savedBank = await request(server())
+      .get('/api/payroll/bank-details')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(savedBank.body).toEqual(bank);
+    const audit = await request(server())
+      .get(`/api/audit?recordId=${employee.id}`)
+      .set(auth(adminToken))
+      .expect(200);
+    expect(
+      audit.body.filter(
+        (row: { action: string }) => row.action === 'employee.deleted',
+      ),
+    ).toHaveLength(1);
+  });
+  it('rolls back employee deletion when the audit cannot be recorded', async () => {
+    const record = vi
+      .spyOn(app.get(AuditService), 'record')
+      .mockRejectedValueOnce(new Error('Audit unavailable'));
+    await request(server())
+      .delete(`/api/employees/${employee.id}`)
+      .set(auth(adminToken))
+      .expect(500);
+    record.mockRestore();
+    const directory = await request(server())
+      .get('/api/employees')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(
+      directory.body.some(
+        (row: Employee) => row.id === employee.id && row.active,
+      ),
+    ).toBe(true);
+    await request(server())
+      .get('/api/auth/me')
+      .set(auth(employeeToken))
+      .expect(200);
+  });
+  it('saves private bank details through REST and prevents employee access', async () => {
+    const bank = {
+      settings: {
+        debitAccount: '0012345678901',
+        transactionTypeCode: 'BT',
+        purposeCode: '13',
+        paymentType: 'SALARY',
+        purposeOfPayment: 'SALARY',
+      },
+      employees: [
+        {
+          employeeId: employee.id,
+          beneficiaryName: employee.name,
+          account: '0000987654321',
+          swift: 'ARABEGXXXX',
+        },
+      ],
+    };
+    await request(server())
+      .get('/api/payroll/bank-details')
+      .set(auth(employeeToken))
+      .expect(403);
+    await request(server())
+      .post('/api/payroll/bank-details')
+      .set(auth(employeeToken))
+      .send(bank)
+      .expect(403);
+    await request(server())
+      .post('/api/payroll/bank-details')
+      .set(auth(adminToken))
+      .send(bank)
+      .expect(201);
+    const saved = await request(server())
+      .get('/api/payroll/bank-details')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(saved.body).toEqual(bank);
+    const me = await request(server())
+      .get('/api/auth/me')
+      .set(auth(employeeToken))
+      .expect(200);
+    expect(JSON.stringify(me.body)).not.toContain('0000987654321');
+    const audit = await request(server())
+      .get('/api/audit?recordId=payroll-bank')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(audit.body[0].action).toBe('payroll.bank_details.updated');
+    expect(JSON.stringify(audit.body)).not.toContain('0000987654321');
+  });
+  it('exempts linked administrator accounts from attendance and payroll deductions', async () => {
+    const admin = (
+      await request(server())
+        .post('/api/employees')
+        .set(auth(adminToken))
+        .send({
+          ...fields(),
+          nationalId: 'ADMIN-EXEMPT',
+          email: 'exempt-admin@test.local',
+          role: 'admin',
+          password: employeePassword,
+        })
+        .expect(201)
+    ).body;
+    const token = (
+      await request(server())
+        .post('/api/auth/login')
+        .send({ email: admin.email, password: employeePassword })
+        .expect(201)
+    ).body.token;
+    const me = await request(server())
+      .get('/api/auth/me')
+      .set(auth(token))
+      .expect(200);
+    expect(me.body.employee).toBeNull();
+    await submit('/api/attendance/check-in', token).expect(400);
+    const report = await request(server())
+      .get('/api/attendance?from=2026-10-04&to=2026-10-04')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(
+      report.body.some(
+        (row: { employeeId: string }) => row.employeeId === admin.id,
+      ),
+    ).toBe(false);
+    const payroll = await request(server())
+      .get('/api/payroll?month=2026-10')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(
+      payroll.body.some(
+        (row: { employeeId: string }) => row.employeeId === admin.id,
+      ),
+    ).toBe(false);
+    expect(
+      payroll.body.some(
+        (row: { employeeId: string }) => row.employeeId === employee.id,
+      ),
+    ).toBe(true);
+    await request(server())
+      .post('/api/payroll/deductions')
+      .set(auth(adminToken))
+      .send({
+        employeeId: admin.id,
+        month: '2026-10',
+        days: 1,
+        reason: 'Administrator exemption test',
+        approvedBy: 'Test administrator',
+      })
+      .expect(400);
+  });
+  it('keeps persistent mobile sessions until logout while ordinary sessions expire', async () => {
+    const mobile = await request(server())
+      .post('/api/auth/login')
+      .send({
+        email: employee.email,
+        password: employeePassword,
+        persistent: true,
+      })
+      .expect(201);
+    vi.setSystemTime(new Date('2056-10-04T20:00:00Z'));
+    await request(server())
+      .get('/api/auth/me')
+      .set(auth(employeeToken))
+      .expect(401);
+    // Another login runs expired-session cleanup; persistent tokens must survive it.
+    await request(server())
+      .post('/api/auth/login')
+      .send({ email: employee.email, password: employeePassword })
+      .expect(201);
+    await request(server())
+      .get('/api/auth/me')
+      .set(auth(mobile.body.token))
+      .expect(200);
+    await request(server())
+      .post('/api/auth/logout')
+      .set(auth(mobile.body.token))
+      .expect(201);
+    await request(server())
+      .get('/api/auth/me')
+      .set(auth(mobile.body.token))
+      .expect(401);
+  });
   it('limits failed logins and expires sessions', async () => {
     for (let i = 0; i < 5; i++)
       await request(server())
@@ -3975,6 +4294,14 @@ describe('HR REST API', () => {
     expect(audit[0].reason).toBe(input.reason);
   });
   it('revokes all sessions when a user changes their password', async () => {
+    const mobile = await request(server())
+      .post('/api/auth/login')
+      .send({
+        email: employee.email,
+        password: employeePassword,
+        persistent: true,
+      })
+      .expect(201);
     await request(server())
       .post('/api/auth/password')
       .set(auth(employeeToken))
@@ -3986,6 +4313,10 @@ describe('HR REST API', () => {
     await request(server())
       .get('/api/auth/me')
       .set(auth(employeeToken))
+      .expect(401);
+    await request(server())
+      .get('/api/auth/me')
+      .set(auth(mobile.body.token))
       .expect(401);
     await request(server())
       .post('/api/auth/login')

@@ -22,7 +22,12 @@ export class AuthService {
     @Inject(AuditService) private readonly audit: AuditService,
   ) {}
 
-  async login(email: string, password: string, workspace?: string) {
+  async login(
+    email: string,
+    password: string,
+    workspace?: string,
+    persistent = false,
+  ) {
     const companyId = await this.store.workspaceCompany(
       workspace ?? process.env.HR_DEFAULT_WORKSPACE ?? '',
     );
@@ -81,7 +86,10 @@ export class AuthService {
           .run(
             tokenHash(token),
             current.id,
-            new Date(now + 12 * 3600000).toISOString(),
+            // Expiry is stored/compared as text; infinity sorts after ISO dates.
+            persistent
+              ? 'infinity'
+              : new Date(now + 12 * 3600000).toISOString(),
           );
         const actor = this.actor(current);
         await this.audit.record(

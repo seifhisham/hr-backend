@@ -17,6 +17,7 @@ import { CompanyService } from '../company/company.service.js';
 import type { Actor } from '../common/types/actor.type.js';
 import { EmployeesService } from '../employees/employees.service.js';
 import type { EmployeeRequest } from '../requests/types/employee-request.type.js';
+import type { BankDetails } from './dto/bank-details.dto.js';
 @Injectable()
 export class PayrollService {
   constructor(
@@ -29,6 +30,72 @@ export class PayrollService {
     @Inject(AuditService)
     private readonly auditService: AuditService,
   ) {}
+  async bankDetails(actor: Actor): Promise<BankDetails> {
+    requireHr(actor);
+    const allowed = new Set(
+      (await this.employeesService.employees(actor, true))
+        .filter((employee) => employee.role !== 'admin')
+        .map((employee) => employee.id),
+    );
+    const stored = await this.store
+      .prepare("SELECT key,value FROM settings WHERE key LIKE 'payroll-bank:%'")
+      .all();
+    const settings = stored.find((row) => row.key === 'payroll-bank:company');
+    return {
+      settings: settings
+        ? (JSON.parse(settings.value as string) as BankDetails['settings'])
+        : {
+            debitAccount: '',
+            transactionTypeCode: 'BT',
+            purposeCode: '13',
+            paymentType: 'SALARY',
+            purposeOfPayment: 'SALARY',
+          },
+      employees: stored
+        .filter((row) =>
+          allowed.has(String(row.key).slice('payroll-bank:'.length)),
+        )
+        .map(
+          (row) =>
+            JSON.parse(row.value as string) as BankDetails['employees'][number],
+        ),
+    };
+  }
+  async saveBankDetails(actor: Actor, input: BankDetails) {
+    requireHr(actor);
+    return this.store.transaction(async () => {
+      // Validate the entire batch against current branch access before writing any bank details.
+      for (const row of input.employees) {
+        if (
+          (await this.employeesService.employee(row.employeeId)).role ===
+          'admin'
+        )
+          throw new BadRequestException(
+            'Administrator accounts are excluded from bank payroll',
+          );
+      }
+      for (const [key, value] of [
+        ['payroll-bank:company', input.settings],
+        ...input.employees.map(
+          (row) => [`payroll-bank:${row.employeeId}`, row] as const,
+        ),
+      ] as const) {
+        await this.store
+          .prepare(
+            'INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(company_id,key) DO UPDATE SET value=excluded.value',
+          )
+          .run(key, JSON.stringify(value));
+      }
+      await this.auditService.record(
+        actor,
+        'payroll.bank_details.updated',
+        'payroll-bank',
+        null,
+        { employeeIds: input.employees.map((row) => row.employeeId) },
+      );
+      return { message: 'Bank details saved' };
+    });
+  }
   async addDeduction(actor: Actor, input: AddDeductionDto) {
     requireHr(actor);
     return await this.store.transaction(async () => {
@@ -45,6 +112,14 @@ export class PayrollService {
         input.employeeId,
         input.month + '-01',
       );
+      if (
+        employee.role === 'admin' ||
+        (await this.employeesService.workflowEmployee(input.employeeId))
+          .role === 'admin'
+      )
+        throw new BadRequestException(
+          'Administrator accounts are exempt from salary deductions',
+        );
       if (input.month < employee.startDate.slice(0, 7))
         throw new BadRequestException(
           'Deduction month cannot be before employment',
@@ -191,7 +266,7 @@ export class PayrollService {
               month + '-31',
             )
           ).employees
-        : await this.employeesService.employees(actor);
+        : await this.employeesService.employees(actor, true);
     const visible = new Set(
       (
         await this.store
@@ -202,7 +277,9 @@ export class PayrollService {
       ).map((row) => row.employee_id),
     );
     const employees = candidates.filter(
-      (employee) => actor.role !== 'hr' || visible.has(employee.id),
+      (employee) =>
+        employee.role !== 'admin' &&
+        (actor.role !== 'hr' || visible.has(employee.id)),
     );
     const requests = (
       await this.store.db
@@ -239,7 +316,16 @@ export class PayrollService {
       manualByEmployee.set(deduction.employeeId, deductions);
     }
     return employees
-      .filter((employee) => employee.startDate.slice(0, 7) <= month)
+      .filter(
+        (employee) =>
+          employee.startDate.slice(0, 7) <= month &&
+          (!employee.deletedAt ||
+            month <=
+              localTime(new Date(employee.deletedAt), timezone).date.slice(
+                0,
+                7,
+              )),
+      )
       .map((employee) => {
         const deductions = (requestsByEmployee.get(employee.id) ?? []).map(
           (request) => ({

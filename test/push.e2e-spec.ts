@@ -693,7 +693,15 @@ it('notifies only the direct manager for real check-in/check-out, with stable ID
   await worker.sweep();
   await worker.sweep();
   expect(send.mock.calls).toEqual([
-    [token + '-attendance-manager', items[0].id, 'employee-checked-in'],
+    [
+      token + '-attendance-manager',
+      items[0].id,
+      'employee-checked-in',
+      {
+        title: items[0].title,
+        message: 'direct-report checked in',
+      },
+    ],
   ]);
   await request(http())
     .patch(`/api/notifications/${items[0].id}/read`)

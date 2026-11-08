@@ -10,6 +10,7 @@ export const loginSchema = z
       .optional(),
     email: z.email().trim().toLowerCase().max(254),
     password: z.string().min(1).max(128),
+    persistent: z.boolean().optional(),
   })
   .strict();
 export const changePasswordSchema = z

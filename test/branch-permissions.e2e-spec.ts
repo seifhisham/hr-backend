@@ -163,6 +163,94 @@ describe('Company and branch permissions', () => {
     vi.unstubAllEnvs();
   });
 
+  it('restricts employee deletion to permitted branches and account roles', async () => {
+    await request(http())
+      .delete(`/api/employees/${employeeB.id}`)
+      .set(auth(hrA.token))
+      .expect(404);
+    await request(http())
+      .delete(`/api/employees/${hrB.id}`)
+      .set(auth(hrA.token))
+      .expect(404);
+    await request(http())
+      .delete(`/api/employees/${hrA.id}`)
+      .set(auth(hrA.token))
+      .expect(400);
+    await request(http())
+      .delete(`/api/employees/${employeeA.id}`)
+      .set(auth(unassigned.token))
+      .expect(403);
+    await request(http())
+      .delete('/api/employees/not-a-uuid')
+      .set(auth(adminToken))
+      .expect(400);
+    await grant(hrA, [branchA, branchB]);
+    await request(http())
+      .delete(`/api/employees/${hrB.id}`)
+      .set(auth(hrA.token))
+      .expect(403);
+    await request(http())
+      .delete(`/api/employees/${employeeA.id}`)
+      .set(auth(hrA.token))
+      .expect(200);
+    const directory = await request(http())
+      .get('/api/employees')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(
+      directory.body.some((row: { id: string }) => row.id === employeeA.id),
+    ).toBe(false);
+    expect(
+      directory.body.some((row: { id: string }) => row.id === employeeB.id),
+    ).toBe(true);
+    await request(http())
+      .get('/api/auth/me')
+      .set(auth(employeeA.token))
+      .expect(401);
+  });
+  it('keeps saved payroll bank accounts within HR branch access', async () => {
+    const settings = {
+      debitAccount: '0012345678901',
+      transactionTypeCode: 'BT',
+      purposeCode: '13',
+      paymentType: 'SALARY',
+      purposeOfPayment: 'SALARY',
+    };
+    const bank = (person: Staff) => ({
+      employeeId: person.id,
+      beneficiaryName: person.email,
+      account: person.id === employeeA.id ? '0000000000001' : '0000000000002',
+      swift: 'ARABEGXXXX',
+    });
+    await request(http())
+      .post('/api/payroll/bank-details')
+      .set(auth(adminToken))
+      .send({ settings, employees: [bank(employeeA), bank(employeeB)] })
+      .expect(201);
+    const visible = await request(http())
+      .get('/api/payroll/bank-details')
+      .set(auth(hrA.token))
+      .expect(200);
+    expect(visible.body.employees).toEqual([bank(employeeA)]);
+    await request(http())
+      .get('/api/payroll/bank-details')
+      .set(auth(unassigned.token))
+      .expect(403);
+    await request(http())
+      .post('/api/payroll/bank-details')
+      .set(auth(hrA.token))
+      .send({
+        settings: { ...settings, debitAccount: 'BADCHANGE' },
+        employees: [bank(employeeA), bank(employeeB)],
+      })
+      .expect(404);
+    const unchanged = await request(http())
+      .get('/api/payroll/bank-details')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(unchanged.body.settings).toEqual(settings);
+    expect(unchanged.body.employees).toHaveLength(2);
+  });
   it('enforces explicit grants, assigned-branch attendance and company-only branch references', async () => {
     const a = (
       await request(http())

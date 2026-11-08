@@ -210,7 +210,10 @@ export class PushWorker {
         return true;
       }
       try {
-        await this.sender.send(device.token as string, item.id, item.type);
+        await this.sender.send(device.token as string, item.id, item.type, {
+          title: item.title,
+          message: item.message,
+        });
       } catch (error) {
         const failure = deliveryFailure(error, Number(row.attempts));
         if (failure.invalid) {

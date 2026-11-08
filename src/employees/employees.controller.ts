@@ -1,11 +1,13 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Inject,
   Param,
   Patch,
   Post,
+  Query,
   Req,
 } from '@nestjs/common';
 import { z } from 'zod';
@@ -26,8 +28,12 @@ export class EmployeesController {
   async employees(
     @Req()
     req: AuthRequest,
+    @Query('includeDeleted') includeDeleted: unknown,
   ) {
-    return await this.employeesService.employees(req.actor);
+    return await this.employeesService.employees(
+      req.actor,
+      parse(z.enum(['true', 'false']).optional(), includeDeleted) === 'true',
+    );
   }
   @Get('reports')
   async reports(
@@ -79,5 +85,9 @@ export class EmployeesController {
       body,
       parse(z.uuid(), id),
     );
+  }
+  @Delete(':id')
+  async deleteEmployee(@Req() req: AuthRequest, @Param('id') id: string) {
+    return this.employeesService.deleteEmployee(req.actor, parse(z.uuid(), id));
   }
 }

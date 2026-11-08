@@ -10,4 +10,5 @@ export type Employee = Omit<
   monthlySalary: number | null;
   salaryCurrency: string;
   salesEnabled: boolean;
+  deletedAt?: string;
 };
