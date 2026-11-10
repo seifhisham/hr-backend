@@ -414,6 +414,7 @@ export class AttendanceService {
     actor: Actor,
     id: string,
     input: AttendanceCorrectionDto,
+    mode?: 'check-out-only',
   ) {
     requireHr(actor);
     const row = (await this.db
@@ -421,7 +422,7 @@ export class AttendanceService {
       .get(id)) as AttendanceRow | undefined;
     if (!row) throw new NotFoundException('Attendance record not found');
     const before = attendance(row);
-    const { checkIn, checkOut } = this.validateTimes(before, input);
+    const { checkIn, checkOut } = this.validateTimes(before, input, mode);
     if (
       !checkOut &&
       (await this.db
@@ -528,8 +529,14 @@ export class AttendanceService {
       return record;
     });
   }
-  validateTimes(record: Attendance, input: AttendanceCorrectionDto) {
-    const checkIn = new Date(input.checkIn).toISOString();
+  validateTimes(
+    record: Attendance,
+    input: AttendanceCorrectionDto,
+    mode?: 'check-out-only',
+  ) {
+    const checkIn = new Date(
+      mode === 'check-out-only' ? record.checkIn : input.checkIn,
+    ).toISOString();
     const checkOut = input.checkOut
       ? new Date(input.checkOut).toISOString()
       : null;
@@ -537,12 +544,14 @@ export class AttendanceService {
       Date.parse(checkIn) > Date.now() ||
       (checkOut &&
         (Date.parse(checkOut) < Date.parse(checkIn) ||
+          (mode === 'check-out-only' && checkOut === checkIn) ||
           Date.parse(checkOut) > Date.now()))
     )
       throw new BadRequestException(
         'Times must be in the past, and check-out must follow check-in',
       );
     if (
+      mode !== 'check-out-only' &&
       workDate(new Date(checkIn), record.schedule, record.timezone) !==
       record.workDate
     )

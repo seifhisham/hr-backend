@@ -3052,33 +3052,72 @@ describe('HR REST API', () => {
     expect(report.body[0].status).toBe('No record');
   });
   it('approves forgotten check-outs atomically with the attendance correction audit', async () => {
+    const nightShift = (
+      await request(server())
+        .post('/api/schedules')
+        .set(auth(adminToken))
+        .send({
+          name: 'Night shift',
+          start: '22:00',
+          end: '06:00',
+          days: [0, 1, 2, 3, 4],
+          graceMinutes: 15,
+        })
+        .expect(201)
+    ).body;
+    await request(server())
+      .patch(`/api/employees/${employee.id}`)
+      .set(auth(adminToken))
+      .send({
+        ...fields(),
+        scheduleId: nightShift.id,
+        scheduleEffectiveFrom: '2026-10-05',
+      })
+      .expect(200);
+    const login = async (email: string, password: string) =>
+      (
+        await request(server())
+          .post('/api/auth/login')
+          .send({ email, password })
+          .expect(201)
+      ).body.token;
+    vi.setSystemTime(new Date('2026-10-04T22:30:00Z')); // October 5, 01:30 in Cairo.
+    employeeToken = await login(employee.email, employeePassword);
     const record = (
       await submit('/api/attendance/check-in', employeeToken).expect(201)
     ).body;
-    vi.setSystemTime(new Date('2026-10-04T16:00:00Z'));
+    expect(record.workDate).toBe('2026-10-05');
+    vi.setSystemTime(new Date('2026-10-06T08:00:00Z'));
+    employeeToken = await login(employee.email, employeePassword);
+    adminToken = await login('admin@test.local', adminPassword);
     const body = {
       type: 'forgotten-check-out',
       attendanceId: record.id,
-      proposedCheckOut: '2026-10-04T15:00:00Z',
+      proposedCheckOut: '2026-10-06T06:00:00+03:00',
       reason: 'Forgot to check out when leaving',
     };
     await request(server())
       .post('/api/requests')
       .set(auth(employeeToken))
-      .send({ ...body, proposedCheckOut: '2026-10-05T15:00:00Z' })
+      .send({ ...body, proposedCheckOut: '2026-10-06T09:00:00Z' })
       .expect(400);
     await request(server())
       .post('/api/requests')
       .set(auth(employeeToken))
       .send({ ...body, proposedCheckOut: '2026-10-04T06:00:00Z' })
       .expect(400);
-    const pending = (
-      await request(server())
-        .post('/api/requests')
-        .set(auth(employeeToken))
-        .send(body)
-        .expect(201)
-    ).body;
+    await request(server())
+      .post('/api/requests')
+      .set(auth(employeeToken))
+      .send({ ...body, proposedCheckOut: '2026-10-05T01:30:00+03:00' })
+      .expect(400);
+    const submitted = await request(server())
+      .post('/api/requests')
+      .set(auth(employeeToken))
+      .send(body);
+    expect(submitted.status, JSON.stringify(submitted.body)).toBe(201);
+    const pending = submitted.body;
+    expect(pending.proposedCheckOut).toBe(body.proposedCheckOut);
     expect(pending.attendance.checkIn).toBe(record.checkIn);
     expect(pending.salaryDeductionDays).toBeNull();
     await request(server())
@@ -3100,7 +3139,7 @@ describe('HR REST API', () => {
       .get('/api/attendance/me')
       .set(auth(employeeToken))
       .expect(200);
-    expect(after.body.records[0].checkOut).toBe('2026-10-04T15:00:00.000Z');
+    expect(after.body.records[0].checkOut).toBe('2026-10-06T03:00:00.000Z');
     const requests = await request(server())
       .get('/api/requests/me')
       .set(auth(employeeToken))

@@ -240,11 +240,15 @@ export class RequestsService {
         if (row.check_out)
           throw new ConflictException('Attendance is already closed');
         originalAttendance = attendance(row);
-        this.attendanceService.validateTimes(attendance(row), {
-          checkIn: row.check_in,
-          checkOut: input.proposedCheckOut,
-          reason: input.reason,
-        });
+        this.attendanceService.validateTimes(
+          originalAttendance,
+          {
+            checkIn: row.check_in,
+            checkOut: input.proposedCheckOut,
+            reason: input.reason,
+          },
+          'check-out-only',
+        );
       } else if (input.from < employee.startDate) {
         throw new BadRequestException(
           'Time off cannot begin before employment',
@@ -528,11 +532,16 @@ export class RequestsService {
             AttendanceRow | undefined;
           if (!record || record.check_out)
             throw new ConflictException('Attendance is no longer open');
-          await this.attendanceService.correctInTransaction(actor, record.id, {
-            checkIn: record.check_in,
-            checkOut: before.proposedCheckOut,
-            reason: `Request ${id}: ${input.reason}`,
-          });
+          await this.attendanceService.correctInTransaction(
+            actor,
+            record.id,
+            {
+              checkIn: record.check_in,
+              checkOut: before.proposedCheckOut,
+              reason: `Request ${id}: ${input.reason}`,
+            },
+            'check-out-only',
+          );
         }
       }
       const after: EmployeeRequest = {
