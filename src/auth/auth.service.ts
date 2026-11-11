@@ -26,7 +26,6 @@ export class AuthService {
     email: string,
     password: string,
     workspace?: string,
-    persistent = false,
   ) {
     const companyId = await this.store.workspaceCompany(
       workspace ?? process.env.HR_DEFAULT_WORKSPACE ?? '',
@@ -87,9 +86,7 @@ export class AuthService {
             tokenHash(token),
             current.id,
             // Expiry is stored/compared as text; infinity sorts after ISO dates.
-            persistent
-              ? 'infinity'
-              : new Date(now + 12 * 3600000).toISOString(),
+            'infinity',
           );
         const actor = this.actor(current);
         await this.audit.record(

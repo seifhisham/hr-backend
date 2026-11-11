@@ -40,14 +40,13 @@ export class AuthController {
       body.email,
       body.password,
       body.workspace,
-      body.persistent,
     );
     res.cookie(SESSION_COOKIE, token, {
       httpOnly: true,
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
       path: '/api',
-      maxAge: 12 * 3600000,
+      maxAge: 400 * 24 * 3600000,
     });
     // Native clients use this token; browser clients use the HttpOnly cookie.
     return { user, token };

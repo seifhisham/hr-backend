@@ -3923,7 +3923,7 @@ describe('HR REST API', () => {
     ).body;
     expect(report[0].status).toBe('Missing check-out');
     vi.setSystemTime(new Date('2026-10-05T07:00:00Z'));
-    // Renew the session after its 12-hour expiry.
+    // Sign in again for the next request.
     employeeToken = (
       await request(server())
         .post('/api/auth/login')
@@ -4248,7 +4248,7 @@ describe('HR REST API', () => {
       })
       .expect(400);
   });
-  it('keeps persistent mobile sessions until logout while ordinary sessions expire', async () => {
+  it('keeps sessions until logout', async () => {
     const mobile = await request(server())
       .post('/api/auth/login')
       .send({
@@ -4261,8 +4261,8 @@ describe('HR REST API', () => {
     await request(server())
       .get('/api/auth/me')
       .set(auth(employeeToken))
-      .expect(401);
-    // Another login runs expired-session cleanup; persistent tokens must survive it.
+      .expect(200);
+    // Another login runs expired-session cleanup; active tokens must survive it.
     await request(server())
       .post('/api/auth/login')
       .send({ email: employee.email, password: employeePassword })
@@ -4280,7 +4280,7 @@ describe('HR REST API', () => {
       .set(auth(mobile.body.token))
       .expect(401);
   });
-  it('limits failed logins and expires sessions', async () => {
+  it('limits failed logins and keeps sessions active', async () => {
     for (let i = 0; i < 5; i++)
       await request(server())
         .post('/api/auth/login')
@@ -4294,7 +4294,7 @@ describe('HR REST API', () => {
     await request(server())
       .get('/api/auth/me')
       .set(auth(employeeToken))
-      .expect(401);
+      .expect(200);
   });
   it('allows only HR to enter missing attendance, validates times, and audits the reason', async () => {
     const input = {
