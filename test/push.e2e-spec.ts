@@ -90,13 +90,13 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-it('requires a live session, validates the exact Android schema, and rate limits registration', async () => {
+it('requires a live session, validates the device registration schema, and rate limits registration', async () => {
   await request(http()).post('/api/push/devices').send(body()).expect(401);
   await request(http()).delete(`/api/push/devices/${deviceId}`).expect(401);
   for (const changes of [
     { userId: 'user-b' },
     { companyId: testCompanyId },
-    { platform: 'ios' },
+    { platform: 'web' },
     { deviceId: 'firebase-fid' },
     { token: 'bad token' },
   ])
@@ -125,7 +125,11 @@ it('is idempotent, supports multiple devices, rotates tokens, and unregisters on
   await register('session-a', {
     deviceId: second,
     token: token + '-second',
+    platform: 'ios',
   }).expect(200);
+  expect((await rows()).find((row) => row.device_id === second)?.platform).toBe(
+    'ios',
+  );
   await register('session-a', { token: token + '-rotated' }).expect(200);
   expect(await rows()).toHaveLength(2);
   expect((await rows()).find((row) => row.device_id === deviceId)?.token).toBe(
@@ -198,6 +202,7 @@ it('persists events before send, deduplicates per event/recipient/device, and pr
   await register('session-a-new', {
     deviceId: randomUUID(),
     token: token + '-second',
+    platform: 'ios',
   }).expect(200);
   inbox();
   const send = vi
@@ -689,10 +694,19 @@ it('notifies only the direct manager for real check-in/check-out, with stable ID
     readAt: null,
   });
   for (const name of ['other-manager', 'direct-report', 'session-a'])
-    expect(await inboxFor(name)).toHaveLength(0);
+    expect(
+      (await inboxFor(name)).filter(
+        (item) => item.type === 'employee-checked-in',
+      ),
+    ).toHaveLength(0);
   await worker.sweep();
   await worker.sweep();
-  expect(send.mock.calls).toEqual([
+  const attendanceSends = () =>
+    send.mock.calls.filter(
+      ([, , type]) =>
+        type === 'employee-checked-in' || type === 'employee-checked-out',
+    );
+  expect(attendanceSends()).toEqual([
     [
       token + '-attendance-manager',
       items[0].id,
@@ -715,9 +729,9 @@ it('notifies only the direct manager for real check-in/check-out, with stable ID
   await capture(`/api/attendance/${record.id}/check-out`).expect(201);
   await capture(`/api/attendance/${record.id}/check-out`).expect(201);
   await worker.sweep();
-  expect(send).toHaveBeenCalledTimes(2);
-  expect(send.mock.calls[1][0]).toBe(token + '-attendance-manager');
-  expect(send.mock.calls[1][2]).toBe('employee-checked-out');
+  expect(attendanceSends()).toHaveLength(2);
+  expect(attendanceSends()[1][0]).toBe(token + '-attendance-manager');
+  expect(attendanceSends()[1][2]).toBe('employee-checked-out');
   expect(
     (await inboxFor('attendance-manager')).filter(
       (item) => item.type === 'employee-checked-out',
@@ -746,10 +760,11 @@ it('cancels a previous manager retry after reassignment and prevents cross-compa
     .run();
   expect(await inboxFor('attendance-manager')).toHaveLength(0);
   await worker.sweep();
-  expect(send.mock.calls.map(([value]) => value)).toEqual([
-    token + '-attendance-manager',
-    token + '-other-manager',
-  ]);
+  expect(
+    send.mock.calls
+      .filter(([, , type]) => type === 'employee-checked-in')
+      .map(([value]) => value),
+  ).toEqual([token + '-attendance-manager', token + '-other-manager']);
   expect(
     (await rows('push_deliveries')).find(
       (row) => row.user_id !== other.id && row.state === 'cancelled',

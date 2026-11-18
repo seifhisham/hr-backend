@@ -5,7 +5,7 @@ import { RUNTIME_SCHEMA } from './runtime-schema.js';
 import { BRANCH_SCHEMA } from './branch-schema.js';
 import { OWNER_SCHEMA } from './owner-schema.js';
 import { BRANCH_LIMIT_SCHEMA } from './branch-limits-schema.js';
-import { PUSH_SCHEMA } from './push-schema.js';
+import { IOS_PUSH_SCHEMA, PUSH_SCHEMA } from './push-schema.js';
 
 export const MIGRATIONS = [
   { version: 1, name: 'company_foundation', sql: INITIAL_SCHEMA },
@@ -14,6 +14,7 @@ export const MIGRATIONS = [
   { version: 4, name: 'platform_owner_onboarding', sql: OWNER_SCHEMA },
   { version: 5, name: 'owner_company_branch_limits', sql: BRANCH_LIMIT_SCHEMA },
   { version: 6, name: 'android_push_delivery', sql: PUSH_SCHEMA },
+  { version: 7, name: 'ios_push_devices', sql: IOS_PUSH_SCHEMA },
 ];
 
 export async function migrate(pool: Pool) {

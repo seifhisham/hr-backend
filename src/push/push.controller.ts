@@ -21,7 +21,7 @@ export const deviceSchema = z
   .object({
     deviceId: z.uuid(),
     token: z.string().min(20).max(4096).regex(/^\S+$/),
-    platform: z.literal('android'),
+    platform: z.enum(['android', 'ios']),
   })
   .strict();
 type DeviceInput = z.infer<typeof deviceSchema>;
@@ -42,10 +42,15 @@ export class PushController {
   ) {
     await this.store.transaction(() =>
       this.store
-        .prepare('SELECT hr_register_push(?,?,?)')
-        .get(tokenHash(req.sessionToken), body.deviceId, body.token),
+        .prepare('SELECT hr_register_push(?,?,?,?)')
+        .get(
+          tokenHash(req.sessionToken),
+          body.deviceId,
+          body.token,
+          body.platform,
+        ),
     );
-    return { deviceId: body.deviceId, platform: 'android' as const };
+    return { deviceId: body.deviceId, platform: body.platform };
   }
 
   @Delete(':deviceId')

@@ -4,7 +4,10 @@ export const PUSH_TABLES = [
   'push_events',
   'push_deliveries',
 ] as const;
-export const PUSH_FUNCTIONS = ['hr_register_push(text,uuid,text)'] as const;
+export const PUSH_FUNCTIONS = [
+  'hr_register_push(text,uuid,text)',
+  'hr_register_push(text,uuid,text,text)',
+] as const;
 
 export const PUSH_SCHEMA = `
   CREATE TABLE push_devices (
@@ -73,5 +76,24 @@ export const PUSH_SCHEMA = `
   DO $$ BEGIN IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='hr_runtime') THEN
     GRANT SELECT,INSERT,UPDATE,DELETE ON ${PUSH_TABLES.join(',')} TO hr_runtime;
     GRANT EXECUTE ON FUNCTION hr_register_push(text,uuid,text) TO hr_runtime;
+  END IF; END $$;
+`;
+
+export const IOS_PUSH_SCHEMA = `
+  ALTER TABLE public.push_devices DROP CONSTRAINT push_devices_platform_check;
+  ALTER TABLE public.push_devices ADD CONSTRAINT push_devices_platform_check CHECK(platform IN ('android','ios'));
+  CREATE FUNCTION public.hr_register_push(h text,d uuid,t text,p text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    BEGIN
+      IF p IS NULL OR p NOT IN ('android','ios') THEN
+        RAISE EXCEPTION 'Invalid push platform' USING ERRCODE='22023';
+      END IF;
+      PERFORM public.hr_register_push(h,d,t);
+      UPDATE public.push_devices SET platform=p,binding_id=gen_random_uuid()
+        WHERE device_id=d AND platform IS DISTINCT FROM p;
+    END $$;
+  REVOKE ALL ON FUNCTION public.hr_register_push(text,uuid,text,text) FROM PUBLIC;
+  DO $$ BEGIN IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='hr_runtime') THEN
+    GRANT EXECUTE ON FUNCTION public.hr_register_push(text,uuid,text,text) TO hr_runtime;
   END IF; END $$;
 `;
