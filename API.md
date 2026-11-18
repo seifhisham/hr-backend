@@ -182,7 +182,7 @@ Filters and authorization are applied before the limit. Managed lists contain on
 
 
 - `POST /requests`: submits a pending request for the authenticated active employee. Employee identity is always session-derived.
-  Vacation requests use `type: "leave"`. New leave and personal holiday decisions record `salaryDeductionDays`: 1 for approval or 3 for rejection, once per request regardless of its date range. Pending requests, historical decisions, and forgotten check-out requests have `null`. This field is server-managed and stored atomically with the final decision and audit; repeated decisions return 409. The payroll preview converts these days into monetary deductions. Existing decided requests are not charged retroactively.
+  Vacation requests use `type: "leave"`. New final decisions record `salaryDeductionDays` from the company [deduction policy](#configurable-deduction-rules) for the request type and outcome (defaults: 1 for approval, 3 for rejection, 0 for approved missions and approved excuses), once per request regardless of its date range. Values may be fractional in 0.25-day steps. Pending requests, historical decisions, and forgotten check-out requests have `null`. This field is server-managed and stored atomically with the final decision and audit; repeated decisions return 409. The payroll preview converts these days into monetary deductions. Existing decided requests are not charged retroactively.
 - `GET /requests/me`: only the employee's own requests, newest first, including HR decisions.
 - `GET /requests`: HR/admin queue, newest first, including all statuses.
 - `PATCH /requests/:id/decision`: HR/admin only; `{ "status": "approved", "reason": "Departure confirmed by HR" }`. Status may also be `rejected`.
@@ -306,6 +306,38 @@ On first startup after upgrading, existing department assignments are converted 
 - The web manager workspace includes direct report requests, attendance, and sales performance. Request details show the recommendation, reason, reviewer, and time. All assignments, manager reviews, and final decisions are audited.
 
 
+### Configurable deduction rules
+
+`GET /api/deduction-policy` and `PUT /api/deduction-policy` are HR/admin only (employees and managers receive 403). The policy is company-wide and stored in `settings` under `deduction-policy`.
+
+```json
+{
+  "rules": {
+    "requests": {
+      "leave": { "approved": 1, "rejected": 3 },
+      "holiday": { "approved": 1, "rejected": 3 },
+      "sick": { "approved": 1, "rejected": 3 },
+      "unpaid": { "approved": 1, "rejected": 3 },
+      "urgent": { "approved": 1, "rejected": 3 },
+      "mission": { "approved": 0, "rejected": 3 },
+      "excuse": { "approved": 0, "rejected": 3 },
+      "forgotten-check-out": { "approved": 0, "rejected": 0 }
+    },
+    "lateArrival": {
+      "enabled": false,
+      "freeLatesPerMonth": 0,
+      "exemptApprovedRequests": true,
+      "tiers": [{ "fromMinutes": 1, "days": 0.25 }, { "fromMinutes": 60, "days": 0.5 }]
+    }
+  },
+  "reason": "Management approved the new attendance policy"
+}
+```
+
+- Days are 0–30 in 0.25 steps. All request types are required. Up to 10 lateness tiers with distinct `fromMinutes` (1–1440); enabling late deductions requires at least one tier. The reason (5–500 characters) is stored in the `deduction_policy.updated` audit with before/after values. The response returns the rules plus `updatedAt`/`updatedBy` (null until first saved). Without a saved policy the defaults above apply, matching the previous fixed behavior.
+- Request rules are applied when HR gives the final decision; already-decided requests keep their saved `salaryDeductionDays`. A forgotten check-out keeps `null` unless its rule is above 0, in which case the payroll-lock check applies to that decision too.
+- Late-arrival rules are evaluated when payroll is calculated. For each attendance record in the payroll month (by work date) that is later than shift start plus grace, the highest tier reached gives the days. The first `freeLatesPerMonth` late arrivals are free; days covered by an approved leave, holiday, sick, unpaid, urgent or mission request are exempt when `exemptApprovedRequests` is true. An approved `arriving-late` excuse always adds its `durationMinutes` to that date's allowed arrival (shift start + grace + excuse), independent of that setting: arriving within it is not late, and only minutes beyond it count. The same rule sets the attendance `status`/`late` in `GET /api/attendance`, `GET /api/attendance/me` and reports. No early-leave status exists, so leaving-early excuses need no adjustment. Payroll rows include `lateDeductions` (`attendanceId`, `workDate`, `minutesLate`, `days`, `exemption`), added to `deductionDays`. Changing rules changes draft payroll and its revision; approved payroll stays frozen.
+
 ### Payroll approval and locking
 
 HR/admin can approve and permanently lock a current or past month's payroll from the Payroll section. The approval saves the reviewed employee roster, names/numbers, departments, active flags, currencies, gross salaries, daily rates, deduction days and amounts, net salaries, request deduction breakdowns, and manual deductions with their reasons/approvers/recorders. Company name and timezone are also saved. Employee or company edits after approval affect draft months and do not recalculate approved payroll.
@@ -318,7 +350,7 @@ HR/admin can approve and permanently lock a current or past month's payroll from
 - Reopening a request whose deduction is included in any approved snapshot returns 409, even if company timezone/settings later change. Apply payroll adjustments to an unlocked month using the existing manual deduction flow. A later final request decision can be made once its decision month is unlocked; decisions are not silently redirected to another month.
 - `GET /api/audit?recordId=YYYY-MM` can retrieve the payroll approval audit; UUID record filters remain supported. Approval records include the approver, reason, time, reviewed draft, and saved snapshot.
 - Mobile/admin clients should show draft/approved state, approval metadata, and locked monetary values from the saved rows. Hide or disable deduction actions on locked runs. Send the exact reviewed revision for approval, and refresh on 409. Future bank salary-file generation must use the approved snapshot instead of calculating salaries from current employee records.
-- Approval freezes the payroll calculation; it does not send a bank file or transfer money. The existing salary/30 calculation and request deduction rules are unchanged.
+- Approval freezes the payroll calculation; it does not send a bank file or transfer money. The salary/30 calculation is unchanged; deduction amounts follow the configurable deduction rules.
 
 ## Effective-dated schedule assignments
 

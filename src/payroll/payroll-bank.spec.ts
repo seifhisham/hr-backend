@@ -1,3 +1,4 @@
+import type { DeductionPolicyService } from '../deduction-policy/deduction-policy.service.js';
 import { PayrollService } from './payroll.service.js';
 import { bankDetailsSchema, type BankDetails } from './dto/bank-details.dto.js';
 import type { EmployeesService } from '../employees/employees.service.js';
@@ -45,6 +46,7 @@ beforeEach(() => {
       transaction: async (fn: () => Promise<unknown>) => fn(),
     } as unknown as DatabaseService,
     { record } as unknown as AuditService,
+    {} as DeductionPolicyService,
   );
 });
 const input = (): BankDetails => ({

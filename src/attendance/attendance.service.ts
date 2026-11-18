@@ -20,6 +20,7 @@ import { SchedulesService } from '../schedules/schedules.service.js';
 import type { Evidence } from './attendance-evidence.service.js';
 import { AttendanceEvidence } from './attendance-evidence.service.js';
 import { AttendanceLocationService } from './attendance-location.service.js';
+import { arrivalExcuseMinutes } from './arrival-excuses.js';
 import {
   arrivalStatus,
   attendanceStatus,
@@ -117,6 +118,15 @@ export class AttendanceService {
         'SELECT * FROM attendance WHERE employee_id = ? ORDER BY work_date DESC LIMIT 93',
       )
       .all(employee.id)) as AttendanceRow[];
+    const excused = arrivalExcuseMinutes(
+      (
+        await this.db
+          .prepare(
+            "SELECT data FROM employee_requests WHERE employee_id = ? AND status = 'approved' AND data::jsonb->>'type' = 'excuse'",
+          )
+          .all(employee.id)
+      ).map((row) => JSON.parse(row.data as string) as EmployeeRequest),
+    );
     return {
       employee,
       schedule: current.schedule,
@@ -124,7 +134,11 @@ export class AttendanceService {
       records: await Promise.all(
         records.map(async (r) => ({
           ...attendance(r),
-          status: attendanceStatus(attendance(r), new Date()),
+          status: attendanceStatus(
+            attendance(r),
+            new Date(),
+            excused.get(`${employee.id}:${r.work_date}`) ?? 0,
+          ),
           location: await this.location.view(r.id),
         })),
       ),
@@ -310,15 +324,15 @@ export class AttendanceService {
     );
     const rows: ReportRow[] = [];
     const now = new Date();
-    const timeOff = (
+    const approvedRequests = (
       await this.db
         .prepare(
           "SELECT data FROM employee_requests WHERE status = 'approved' AND employee_id IN (SELECT value FROM jsonb_array_elements_text(?::jsonb)) AND (data::jsonb->>'from') <= ? AND (data::jsonb->>'to') >= ?",
         )
         .all(employeeIds, filters.to, filters.from)
-    )
-      .map((r) => JSON.parse(r.data as string) as EmployeeRequest)
-      .filter(
+    ).map((r) => JSON.parse(r.data as string) as EmployeeRequest);
+    const excused = arrivalExcuseMinutes(approvedRequests);
+    const timeOff = approvedRequests.filter(
         (r) =>
           r.status === 'approved' &&
           r.type !== 'forgotten-check-out' &&
@@ -362,11 +376,12 @@ export class AttendanceService {
               r.from <= date &&
               r.to >= date,
           );
-        const arrival = record ? arrivalStatus(record) : null;
+        const excusedMinutes = excused.get(`${employee.id}:${date}`) ?? 0;
+        const arrival = record ? arrivalStatus(record, excusedMinutes) : null;
         const status = record
           ? record.checkOut
             ? arrival!
-            : attendanceStatus(record, now)
+            : attendanceStatus(record, now, excusedMinutes)
           : approved
             ? approved.type === 'leave'
               ? 'Approved leave'

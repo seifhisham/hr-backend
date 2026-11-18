@@ -3,16 +3,37 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  NotFoundException,
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ApprovePayrollDto } from './dto/approval.dto.js';
-import type { PayrollRun, PayrollRow } from './types/payroll-run.type.js';
-import { requireUnlockedPayroll } from './payroll-lock.js';
+import type {
+  AutomaticDeduction,
+  DeductionAdjustment,
+  LateDeduction,
+  PayrollRun,
+  PayrollRow,
+} from './types/payroll-run.type.js';
+import {
+  requireUnlockedPayroll,
+  requireUnlockedRequest,
+} from './payroll-lock.js';
 import { AuditService } from '../audit/audit.service.js';
 import { requireHr, requireAdmin } from '../common/security/permissions.js';
 import { DatabaseService } from '../database/database.service.js';
-import type { AddDeductionDto, PayrollDeduction } from './dto/deduction.dto.js';
-import { localTime } from '../attendance/attendance-time.js';
+import type {
+  AddDeductionDto,
+  AdjustDeductionDto,
+  PayrollDeduction,
+} from './dto/deduction.dto.js';
+import { localTime, minutesLate } from '../attendance/attendance-time.js';
+import { arrivalExcuseMinutes } from '../attendance/arrival-excuses.js';
+import {
+  attendance,
+  type AttendanceRow,
+} from '../attendance/attendance.mapper.js';
+import { DeductionPolicyService } from '../deduction-policy/deduction-policy.service.js';
+import { lateArrivalDays } from '../deduction-policy/deduction-policy.js';
 import { CompanyService } from '../company/company.service.js';
 import type { Actor } from '../common/types/actor.type.js';
 import { EmployeesService } from '../employees/employees.service.js';
@@ -29,6 +50,8 @@ export class PayrollService {
     private readonly store: DatabaseService,
     @Inject(AuditService)
     private readonly auditService: AuditService,
+    @Inject(DeductionPolicyService)
+    private readonly deductionPolicy: DeductionPolicyService,
   ) {}
   async bankDetails(actor: Actor): Promise<BankDetails> {
     requireHr(actor);
@@ -299,7 +322,10 @@ export class PayrollService {
     const requestsByEmployee = new Map<string, EmployeeRequest[]>();
     for (const request of requests) {
       if (
-        (request.type === 'mission' && request.status === 'approved') ||
+        // Older approved missions saved 1 day before missions became paid; policy-based values are used as saved.
+        (request.type === 'mission' &&
+          request.status === 'approved' &&
+          !request.deductionPolicyApplied) ||
         !request.decidedAt ||
         localTime(new Date(request.decidedAt), timezone).date.slice(0, 7) !==
           month
@@ -315,6 +341,10 @@ export class PayrollService {
       deductions.push(deduction);
       manualByEmployee.set(deduction.employeeId, deductions);
     }
+    const lateByEmployee = await this.lateDeductions(
+      month,
+      new Set(employees.map((employee) => employee.id)),
+    );
     return employees
       .filter(
         (employee) =>
@@ -330,13 +360,17 @@ export class PayrollService {
         const deductions = (requestsByEmployee.get(employee.id) ?? []).map(
           (request) => ({
             requestId: request.id,
+            type: request.type,
             status: request.status,
             decidedAt: request.decidedAt,
             days: request.salaryDeductionDays!,
+            adjustment: request.salaryDeductionAdjustment ?? null,
           }),
         );
         const manualDeductions = manualByEmployee.get(employee.id) ?? [];
+        const lateDeductions = lateByEmployee.get(employee.id) ?? [];
         const deductionDays =
+          lateDeductions.reduce((total, late) => total + late.days, 0) +
           manualDeductions.reduce(
             (total, deduction) => total + deduction.days,
             0,
@@ -369,7 +403,270 @@ export class PayrollService {
             grossCents === null ? null : (grossCents - deductionCents!) / 100,
           deductions,
           manualDeductions,
+          lateDeductions,
         };
       });
   }
+  /** Late-arrival charges for the month's work dates under the current policy. */
+  private async lateDeductions(month: string, employeeIds: Set<string>) {
+    const result = new Map<string, LateDeduction[]>();
+    const policy = (await this.deductionPolicy.current()).lateArrival;
+    if (!policy.enabled) return result;
+    const from = `${month}-01`;
+    const to = `${month}-31`;
+    const approved = (
+      await this.store.db
+        .prepare(
+          "SELECT data FROM employee_requests WHERE status = 'approved' AND data::jsonb->>'from' <= ? AND data::jsonb->>'to' >= ?",
+        )
+        .all(to, from)
+    ).map((row) => JSON.parse(row.data as string) as EmployeeRequest);
+    // Arriving-late excuses always apply, by their minutes, so payroll matches the attendance status.
+    const excusedMinutes = arrivalExcuseMinutes(approved);
+    const covered = new Map<string, { from: string; to: string }[]>();
+    if (policy.exemptApprovedRequests)
+      for (const request of approved) {
+        if (request.type === 'forgotten-check-out' || request.type === 'excuse')
+          continue;
+        const ranges = covered.get(request.employeeId) ?? [];
+        ranges.push({ from: request.from, to: request.to });
+        covered.set(request.employeeId, ranges);
+      }
+    const rows = (await this.store.db
+      .prepare(
+        'SELECT * FROM attendance WHERE work_date >= ? AND work_date <= ? ORDER BY work_date',
+      )
+      .all(from, to)) as AttendanceRow[];
+    const overrides = await this.lateOverrides();
+    const lateCount = new Map<string, number>();
+    for (const record of rows.map(attendance)) {
+      if (!employeeIds.has(record.employeeId)) continue;
+      const late = minutesLate(
+        record,
+        excusedMinutes.get(`${record.employeeId}:${record.workDate}`) ?? 0,
+      );
+      if (!late) continue;
+      const excused = (covered.get(record.employeeId) ?? []).some(
+        (range) => range.from <= record.workDate && range.to >= record.workDate,
+      );
+      const count = excused ? 0 : (lateCount.get(record.employeeId) ?? 0) + 1;
+      if (!excused) lateCount.set(record.employeeId, count);
+      const exemption = excused
+        ? 'approved-request'
+        : count <= policy.freeLatesPerMonth
+          ? 'free-allowance'
+          : null;
+      const automaticDays = exemption ? 0 : lateArrivalDays(policy, late);
+      const override = overrides.get(record.id);
+      const list = result.get(record.employeeId) ?? [];
+      list.push({
+        attendanceId: record.id,
+        workDate: record.workDate,
+        minutesLate: late,
+        automaticDays,
+        days: override?.days ?? automaticDays,
+        exemption,
+        adjustment: override?.adjustment ?? null,
+      });
+      result.set(record.employeeId, list);
+    }
+    return result;
+  }
+  private async lateOverrides() {
+    return new Map(
+      (
+        await this.store.db
+          .prepare(
+            `SELECT key,value FROM settings WHERE key LIKE '${lateOverridePrefix}%'`,
+          )
+          .all()
+      ).map((row) => [
+        String(row.key).slice(lateOverridePrefix.length),
+        JSON.parse(row.value as string) as LateOverride,
+      ]),
+    );
+  }
+  /** Automatic request and late-arrival deductions for HR review, from the draft or approved run. */
+  async automaticDeductions(
+    actor: Actor,
+    month: string,
+  ): Promise<AutomaticDeduction[]> {
+    requireHr(actor);
+    const run = await this.run(actor, month);
+    const locked = run.status === 'approved';
+    return run.rows.flatMap((row) => {
+      const employee = {
+        employeeId: row.employeeId,
+        employeeName: row.name,
+        employeeNumber: row.employeeNumber,
+        department: row.department,
+      };
+      return [
+        ...row.deductions.map((item): AutomaticDeduction => ({
+          source: 'request',
+          id: item.requestId,
+          ...employee,
+          date: item.decidedAt,
+          detail: `${item.type ?? 'Request'} ${item.status}`,
+          automaticDays: item.adjustment?.originalDays ?? item.days,
+          days: item.days,
+          adjustment: item.adjustment ?? null,
+          locked,
+        })),
+        ...(row.lateDeductions ?? []).map((item): AutomaticDeduction => ({
+          source: 'late',
+          id: item.attendanceId,
+          ...employee,
+          date: item.workDate,
+          detail: `Late arrival, ${item.minutesLate} min${
+            item.exemption === 'free-allowance'
+              ? ' (free allowance)'
+              : item.exemption === 'approved-request'
+                ? ' (covered by approved request)'
+                : ''
+          }`,
+          automaticDays: item.automaticDays ?? item.days,
+          days: item.days,
+          adjustment: item.adjustment ?? null,
+          locked,
+        })),
+      ];
+    });
+  }
+  /** Edits (or removes, with 0 days) one automatic deduction; every change is audited. */
+  async adjustAutomaticDeduction(
+    actor: Actor,
+    source: 'request' | 'late',
+    id: string,
+    input: AdjustDeductionDto,
+  ) {
+    requireHr(actor);
+    return await this.store.transaction(async () => {
+      const { timezone } = await this.companyService.settings();
+      const adjustment = (originalDays: number): DeductionAdjustment => ({
+        originalDays,
+        reason: input.reason,
+        by: actor.name,
+        byId: actor.id,
+        at: new Date().toISOString(),
+      });
+      const action =
+        input.days === 0 ? 'deduction_removed' : 'deduction_adjusted';
+      if (source === 'request') {
+        const row = await this.store.db
+          .prepare('SELECT data FROM employee_requests WHERE id = ?')
+          .get(id);
+        if (!row) throw new NotFoundException('Request not found');
+        const request = JSON.parse(row.data as string) as EmployeeRequest;
+        if (request.salaryDeductionDays === null || !request.decidedAt)
+          throw new ConflictException(
+            'This request has no automatic salary deduction',
+          );
+        const month = localTime(
+          new Date(request.decidedAt),
+          timezone,
+        ).date.slice(0, 7);
+        await this.requireEditable(request.employeeId, month);
+        await requireUnlockedRequest(this.store.db, id);
+        if (request.salaryDeductionDays === input.days)
+          throw new BadRequestException('The deduction already has this value');
+        const after: EmployeeRequest = {
+          ...request,
+          salaryDeductionDays: input.days,
+          salaryDeductionAdjustment: adjustment(
+            request.salaryDeductionAdjustment?.originalDays ??
+              request.salaryDeductionDays,
+          ),
+        };
+        await this.store.db
+          .prepare('UPDATE employee_requests SET data = ? WHERE id = ?')
+          .run(JSON.stringify(after), id);
+        await this.auditService.record(
+          actor,
+          `request.${action}`,
+          id,
+          {
+            employeeId: request.employeeId,
+            month,
+            days: request.salaryDeductionDays,
+          },
+          {
+            employeeId: request.employeeId,
+            month,
+            days: input.days,
+            originalDays: after.salaryDeductionAdjustment!.originalDays,
+          },
+          input.reason,
+        );
+        return after;
+      }
+      const record = (await this.store.db
+        .prepare('SELECT * FROM attendance WHERE id = ?')
+        .get(id)) as AttendanceRow | undefined;
+      if (!record) throw new NotFoundException('Attendance not found');
+      const month = record.work_date.slice(0, 7);
+      await this.requireEditable(record.employee_id, month);
+      const item = (
+        await this.lateDeductions(month, new Set([record.employee_id]))
+      )
+        .get(record.employee_id)
+        ?.find((late) => late.attendanceId === id);
+      if (!item)
+        throw new ConflictException(
+          'No automatic late-arrival deduction applies to this attendance',
+        );
+      if (item.days === input.days)
+        throw new BadRequestException('The deduction already has this value');
+      const override: LateOverride = {
+        employeeId: record.employee_id,
+        month,
+        days: input.days,
+        adjustment: adjustment(item.automaticDays ?? item.days),
+      };
+      await this.store
+        .prepare(
+          'INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(company_id,key) DO UPDATE SET value=excluded.value',
+        )
+        .run(lateOverridePrefix + id, JSON.stringify(override));
+      await this.auditService.record(
+        actor,
+        `attendance.${action}`,
+        id,
+        { employeeId: record.employee_id, month, days: item.days },
+        {
+          employeeId: record.employee_id,
+          month,
+          days: input.days,
+          originalDays: override.adjustment.originalDays,
+        },
+        input.reason,
+      );
+      return { ...item, days: input.days, adjustment: override.adjustment };
+    });
+  }
+  private async requireEditable(employeeId: string, month: string) {
+    await requireUnlockedPayroll(this.store.db, month);
+    const visible = await this.store
+      .prepare('SELECT hr_month_visible(?,?) AS allowed')
+      .get(employeeId, month);
+    if (!visible?.allowed)
+      throw new BadRequestException(
+        'Payroll spans branches outside your access',
+      );
+    if (
+      (await this.employeesService.workflowEmployee(employeeId)).role ===
+      'admin'
+    )
+      throw new BadRequestException(
+        'Administrator accounts are exempt from salary deductions',
+      );
+  }
 }
+
+const lateOverridePrefix = 'late-deduction:';
+type LateOverride = {
+  employeeId: string;
+  month: string;
+  days: number;
+  adjustment: DeductionAdjustment;
+};

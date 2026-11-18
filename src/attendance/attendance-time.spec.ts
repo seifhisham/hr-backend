@@ -1,8 +1,11 @@
+import { arrivalExcuseMinutes } from './arrival-excuses.js';
+import type { EmployeeRequest } from '../requests/types/employee-request.type.js';
 import type { Schedule } from '../schedules/types/schedule.type.js';
 import {
   arrivalStatus,
   attendanceStatus,
   localTime,
+  minutesLate,
   workDate,
 } from './attendance-time.js';
 import type { Attendance } from './types/attendance.type.js';
@@ -92,5 +95,50 @@ describe('Attendance calendar rules', () => {
         new Date('2026-10-04T23:00:00Z'),
       ),
     ).toBe('Late');
+  });
+});
+describe('minutesLate', () => {
+  it('counts minutes past start plus grace, including after midnight', () => {
+    expect(minutesLate(record('2026-10-04T22:15:00Z'))).toBe(0);
+    expect(minutesLate(record('2026-10-04T22:40:00Z'))).toBe(25);
+    expect(minutesLate(record('2026-10-05T00:15:00Z'))).toBe(120);
+  });
+  it('returns null on unscheduled days', () => {
+    expect(
+      minutesLate({
+        ...record('2026-10-04T22:40:00Z'),
+        workDate: '2026-10-09',
+      }),
+    ).toBeNull();
+  });
+});
+describe('arriving-late excuses', () => {
+  it('moves the late threshold by the excused minutes', () => {
+    // Shift 22:00 with 15 grace; arrival 22:40 is 25 minutes late.
+    expect(minutesLate(record('2026-10-04T22:40:00Z'), 30)).toBe(0);
+    expect(arrivalStatus(record('2026-10-04T22:40:00Z'), 30)).toBe('On time');
+    expect(minutesLate(record('2026-10-04T22:40:00Z'), 10)).toBe(15);
+    expect(arrivalStatus(record('2026-10-04T22:40:00Z'), 10)).toBe('Late');
+  });
+  it('counts only approved arriving-late excuses on each covered date', () => {
+    const base = {
+      employeeId: 'e1',
+      type: 'excuse',
+      excuseType: 'arriving-late',
+      from: '2026-10-04',
+      to: '2026-10-05',
+      durationMinutes: 30,
+      status: 'approved',
+    };
+    const minutes = arrivalExcuseMinutes([
+      base,
+      { ...base, status: 'pending', durationMinutes: 90 },
+      { ...base, excuseType: 'leaving-early', durationMinutes: 45 },
+      { ...base, type: 'leave' },
+    ] as unknown as EmployeeRequest[]);
+    expect([...minutes]).toEqual([
+      ['e1:2026-10-04', 30],
+      ['e1:2026-10-05', 30],
+    ]);
   });
 });

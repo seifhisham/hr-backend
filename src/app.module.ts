@@ -19,6 +19,7 @@ import { EmployeesModule } from './employees/employees.module.js';
 import { HealthModule } from './health/health.module.js';
 import { RequestsModule } from './requests/requests.module.js';
 import { PayrollModule } from './payroll/payroll.module.js';
+import { DeductionPolicyModule } from './deduction-policy/deduction-policy.module.js';
 import { SchedulesModule } from './schedules/schedules.module.js';
 import { SalesModule } from './sales/sales.module.js';
 @Module({
@@ -37,6 +38,7 @@ import { SalesModule } from './sales/sales.module.js';
     AttendanceModule,
     RequestsModule,
     PayrollModule,
+    DeductionPolicyModule,
     SalesModule,
     HealthModule,
   ],

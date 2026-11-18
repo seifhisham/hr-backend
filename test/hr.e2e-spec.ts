@@ -281,7 +281,12 @@ describe('HR REST API', () => {
       .get(DatabaseService)
       .prepare('UPDATE employee_requests SET data = ? WHERE id = ?')
       .run(
-        JSON.stringify({ ...approved.body, salaryDeductionDays: 1 }),
+        // Legacy records predate the policy flag.
+        JSON.stringify({
+          ...approved.body,
+          salaryDeductionDays: 1,
+          deductionPolicyApplied: undefined,
+        }),
         mission.id,
       );
     const payroll = await request(server())
@@ -511,6 +516,308 @@ describe('HR REST API', () => {
       expectedRevision: run.revision,
       reason: 'Reviewed salaries and deductions',
     });
+  it('applies HR-configured request and late-arrival deduction rules', async () => {
+    await salaryForApproval();
+    const policy = await request(server())
+      .get('/api/deduction-policy')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(policy.body.requests.sick).toEqual({ approved: 1, rejected: 3 });
+    expect(policy.body.lateArrival.enabled).toBe(false);
+    await request(server())
+      .get('/api/deduction-policy')
+      .set(auth(employeeToken))
+      .expect(403);
+    const { updatedAt: _at, updatedBy: _by, ...rules } = policy.body;
+    const put = (body: object, token = adminToken) =>
+      request(server())
+        .put('/api/deduction-policy')
+        .set(auth(token))
+        .send(body);
+    await put({
+      rules: {
+        ...rules,
+        requests: { ...rules.requests, sick: { approved: 0.3, rejected: 2 } },
+      },
+      reason: 'Invalid fraction',
+    }).expect(400);
+    await put(
+      { rules, reason: 'Employees cannot change rules' },
+      employeeToken,
+    ).expect(403);
+    const late = {
+      enabled: true,
+      freeLatesPerMonth: 0,
+      exemptApprovedRequests: true,
+      tiers: [
+        { fromMinutes: 30, days: 1 },
+        { fromMinutes: 1, days: 0.25 },
+      ],
+    };
+    const saved = await put({
+      rules: {
+        ...rules,
+        requests: { ...rules.requests, sick: { approved: 0.5, rejected: 2 } },
+        lateArrival: late,
+      },
+      reason: 'Board approved the new attendance policy',
+    }).expect(200);
+    expect(saved.body.lateArrival.tiers[0].fromMinutes).toBe(1);
+    expect(saved.body.updatedBy).toBeTruthy();
+    const sick = (
+      await request(server())
+        .post('/api/requests')
+        .set(auth(employeeToken))
+        .send({
+          type: 'sick',
+          from: '2026-10-06',
+          to: '2026-10-06',
+          reason: 'Doctor appointment',
+        })
+        .expect(201)
+    ).body;
+    const decided = await hrDecision(sick.id).expect(200);
+    expect(decided.body.salaryDeductionDays).toBe(0.5);
+    vi.setSystemTime(new Date('2026-10-04T07:45:00Z'));
+    await submit('/api/attendance/check-in', employeeToken).expect(201);
+    const expectedLate = 45 - schedule.graceMinutes;
+    let row = (await payrollRun()).rows[0];
+    expect(row.lateDeductions).toEqual([
+      expect.objectContaining({
+        workDate: '2026-10-04',
+        minutesLate: expectedLate,
+        days: expectedLate >= 30 ? 1 : 0.25,
+        exemption: null,
+      }),
+    ]);
+    expect(row.deductionDays).toBe(0.5 + (expectedLate >= 30 ? 1 : 0.25));
+    const { updatedAt: _a2, updatedBy: _b2, ...current } = saved.body;
+    await put({
+      rules: {
+        ...current,
+        lateArrival: { ...late, freeLatesPerMonth: 1 },
+      },
+      reason: 'First late arrival each month is free',
+    }).expect(200);
+    row = (await payrollRun()).rows[0];
+    expect(row.lateDeductions[0]).toMatchObject({
+      days: 0,
+      exemption: 'free-allowance',
+    });
+    expect(row.deductionDays).toBe(0.5);
+  });
+  it('lists automatic deductions and logs HR edits and removals', async () => {
+    await salaryForApproval();
+    const rules = (
+      await request(server())
+        .get('/api/deduction-policy')
+        .set(auth(adminToken))
+        .expect(200)
+    ).body;
+    await request(server())
+      .put('/api/deduction-policy')
+      .set(auth(adminToken))
+      .send({
+        rules: {
+          requests: {
+            ...rules.requests,
+            sick: { approved: 0.5, rejected: 2 },
+          },
+          lateArrival: {
+            enabled: true,
+            freeLatesPerMonth: 0,
+            exemptApprovedRequests: true,
+            tiers: [{ fromMinutes: 1, days: 0.25 }],
+          },
+        },
+        reason: 'Enable late-arrival deductions',
+      })
+      .expect(200);
+    const sick = (
+      await request(server())
+        .post('/api/requests')
+        .set(auth(employeeToken))
+        .send({
+          type: 'sick',
+          from: '2026-10-06',
+          to: '2026-10-06',
+          reason: 'Doctor appointment',
+        })
+        .expect(201)
+    ).body;
+    await hrDecision(sick.id).expect(200);
+    vi.setSystemTime(new Date('2026-10-04T07:45:00Z'));
+    const checkIn = (
+      await submit('/api/attendance/check-in', employeeToken).expect(201)
+    ).body;
+    const list = async () =>
+      (
+        await request(server())
+          .get('/api/payroll/automatic-deductions?month=2026-10')
+          .set(auth(adminToken))
+          .expect(200)
+      ).body as {
+        source: string;
+        id: string;
+        days: number;
+        automaticDays: number;
+        adjustment: { originalDays: number; reason: string } | null;
+        locked: boolean;
+      }[];
+    let items = await list();
+    expect(items).toHaveLength(2);
+    expect(items.find((item) => item.source === 'request')).toMatchObject({
+      id: sick.id,
+      days: 0.5,
+      automaticDays: 0.5,
+      adjustment: null,
+      locked: false,
+    });
+    expect(items.find((item) => item.source === 'late')).toMatchObject({
+      id: checkIn.id,
+      days: 0.25,
+    });
+    await request(server())
+      .get('/api/payroll/automatic-deductions?month=2026-10')
+      .set(auth(employeeToken))
+      .expect(403);
+    const adjust = (source: string, id: string, body: object) =>
+      request(server())
+        .patch(`/api/payroll/automatic-deductions/${source}/${id}`)
+        .set(auth(adminToken))
+        .send(body);
+    await adjust('request', sick.id, {
+      days: 0.5,
+      reason: 'No real change',
+    }).expect(400);
+    await adjust('request', sick.id, {
+      days: 0.3,
+      reason: 'Invalid fraction',
+    }).expect(400);
+    await adjust('bonus', sick.id, {
+      days: 0,
+      reason: 'Unknown source',
+    }).expect(400);
+    await request(server())
+      .patch(`/api/payroll/automatic-deductions/request/${sick.id}`)
+      .set(auth(employeeToken))
+      .send({ days: 0, reason: 'Employee cannot edit' })
+      .expect(403);
+    const removed = await adjust('request', sick.id, {
+      days: 0,
+      reason: 'Medical certificate provided',
+    }).expect(200);
+    expect(removed.body).toMatchObject({
+      salaryDeductionDays: 0,
+      salaryDeductionAdjustment: {
+        originalDays: 0.5,
+        reason: 'Medical certificate provided',
+      },
+    });
+    await adjust('late', checkIn.id, {
+      days: 0.75,
+      reason: 'Repeated lateness warning agreed',
+    }).expect(200);
+    items = await list();
+    expect(items.find((item) => item.source === 'late')).toMatchObject({
+      days: 0.75,
+      automaticDays: 0.25,
+      adjustment: { originalDays: 0.25 },
+    });
+    expect((await payrollRun()).rows[0].deductionDays).toBe(0.75);
+    const audit = (
+      await request(server())
+        .get('/api/audit')
+        .set(auth(adminToken))
+        .expect(200)
+    ).body as {
+      action: string;
+      reason: string;
+      before: { days: number };
+      after: { days: number };
+    }[];
+    expect(
+      audit.find((entry) => entry.action === 'request.deduction_removed'),
+    ).toMatchObject({
+      reason: 'Medical certificate provided',
+      before: { days: 0.5 },
+      after: { days: 0 },
+    });
+    expect(
+      audit.find((entry) => entry.action === 'attendance.deduction_adjusted'),
+    ).toMatchObject({ before: { days: 0.25 }, after: { days: 0.75 } });
+    vi.setSystemTime(new Date('2026-10-20T07:00:00Z'));
+    await approvePayroll(await payrollRun()).expect(201);
+    items = await list();
+    expect(items.every((item) => item.locked)).toBe(true);
+    await adjust('late', checkIn.id, {
+      days: 1,
+      reason: 'Too late, payroll approved',
+    }).expect(409);
+  });
+  it('does not mark or deduct late arrivals covered by an approved arriving-late excuse', async () => {
+    await salaryForApproval();
+    const rules = (
+      await request(server())
+        .get('/api/deduction-policy')
+        .set(auth(adminToken))
+        .expect(200)
+    ).body;
+    await request(server())
+      .put('/api/deduction-policy')
+      .set(auth(adminToken))
+      .send({
+        rules: {
+          requests: rules.requests,
+          lateArrival: {
+            enabled: true,
+            freeLatesPerMonth: 0,
+            // Excuses must apply even without the whole-day request exemption.
+            exemptApprovedRequests: false,
+            tiers: [{ fromMinutes: 1, days: 0.25 }],
+          },
+        },
+        reason: 'Enable late-arrival deductions',
+      })
+      .expect(200);
+    const excuse = (
+      await request(server())
+        .post('/api/requests')
+        .set(auth(employeeToken))
+        .send({
+          type: 'excuse',
+          from: '2026-10-04',
+          to: '2026-10-04',
+          durationMinutes: 60,
+          excuseType: 'arriving-late',
+          shiftId: schedule.id,
+          reason: 'Hospital appointment',
+        })
+        .expect(201)
+    ).body;
+    await hrDecision(excuse.id).expect(200);
+    // 45 minutes after the shift start: late without the excuse, on time with it.
+    vi.setSystemTime(new Date('2026-10-04T07:45:00Z'));
+    await submit('/api/attendance/check-in', employeeToken).expect(201);
+    const mine = (
+      await request(server())
+        .get('/api/attendance/me')
+        .set(auth(employeeToken))
+        .expect(200)
+    ).body;
+    expect(mine.records[0].status).toBe('On time');
+    const report = (
+      await request(server())
+        .get('/api/attendance?from=2026-10-04&to=2026-10-04')
+        .set(auth(adminToken))
+        .expect(200)
+    ).body as { employeeId: string; late: boolean; status: string }[];
+    expect(report.find((row) => row.employeeId === employee.id)).toMatchObject({
+      late: false,
+      status: 'On time',
+    });
+    expect((await payrollRun()).rows[0].lateDeductions).toEqual([]);
+  });
   it('freezes approved payroll salaries, employee details and deduction breakdowns', async () => {
     await salaryForApproval();
     const vacation = await workflowRequest();
@@ -2198,7 +2505,8 @@ describe('HR REST API', () => {
     expect(mine.body[0]).toMatchObject({
       ...payload,
       status: 'approved',
-      salaryDeductionDays: 1,
+      // Approved excuses cost nothing under the default deduction rules.
+      salaryDeductionDays: 0,
     });
     const report = await request(server())
       .get('/api/attendance?from=2026-10-05&to=2026-10-05')

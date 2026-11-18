@@ -48,7 +48,12 @@ export function workDate(now: Date, schedule: Schedule, timezone: string) {
     : local.date;
 }
 
-export function attendanceStatus(record: Attendance, now: Date) {
+/** `excusedMinutes`: approved arriving-late excuse for this work date. */
+export function attendanceStatus(
+  record: Attendance,
+  now: Date,
+  excusedMinutes = 0,
+) {
   if (!record.checkOut) {
     const current = localTime(now, record.timezone);
     const endDate =
@@ -62,13 +67,21 @@ export function attendanceStatus(record: Attendance, now: Date) {
     )
       return 'Missing check-out';
   }
-  return arrivalStatus(record);
+  return arrivalStatus(record, excusedMinutes);
 }
 
-export function arrivalStatus(record: Attendance) {
+export function arrivalStatus(record: Attendance, excusedMinutes = 0) {
+  const late = minutesLate(record, excusedMinutes);
+  return late === null ? 'Not scheduled' : late > 0 ? 'Late' : 'On time';
+}
+
+/**
+ * Minutes past the shift start plus grace and any approved arriving-late
+ * excuse; null when the day is unscheduled.
+ */
+export function minutesLate(record: Attendance, excusedMinutes = 0) {
   const local = localTime(new Date(record.checkIn), record.timezone);
-  if (!record.schedule.days.includes(weekday(record.workDate)))
-    return 'Not scheduled';
+  if (!record.schedule.days.includes(weekday(record.workDate))) return null;
   const elapsed =
     local.date === record.workDate
       ? local.minutes
@@ -77,7 +90,11 @@ export function arrivalStatus(record: Attendance) {
           86400000) *
           1440 +
         local.minutes;
-  return elapsed > minutes(record.schedule.start) + record.schedule.graceMinutes
-    ? 'Late'
-    : 'On time';
+  return Math.max(
+    0,
+    elapsed -
+      (minutes(record.schedule.start) +
+        record.schedule.graceMinutes +
+        excusedMinutes),
+  );
 }

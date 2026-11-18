@@ -8,12 +8,17 @@ import {
   Controller,
   Get,
   Inject,
+  Param,
+  Patch,
   Post,
   Query,
   Req,
 } from '@nestjs/common';
 import { ZodValidationPipe } from '../common/validation/zod-validation.pipe.js';
 import {
+  adjustDeductionSchema,
+  automaticDeductionParamsSchema,
+  type AdjustDeductionDto,
   deductionSchema,
   deductionRangeSchema,
   payrollMonthSchema,
@@ -86,6 +91,32 @@ export class PayrollController {
     return await this.payrollService.deductions(
       req.actor,
       parse(deductionRangeSchema, query),
+    );
+  }
+  @RateLimit('reports')
+  @Get('automatic-deductions')
+  async automaticDeductions(
+    @Req() req: AuthRequest,
+    @Query('month') month: unknown,
+  ) {
+    return await this.payrollService.automaticDeductions(
+      req.actor,
+      parse(payrollMonthSchema, month),
+    );
+  }
+  @Patch('automatic-deductions/:source/:id')
+  async adjustAutomaticDeduction(
+    @Req() req: AuthRequest,
+    @Param() params: unknown,
+    @Body(new ZodValidationPipe(adjustDeductionSchema))
+    body: AdjustDeductionDto,
+  ) {
+    const { source, id } = parse(automaticDeductionParamsSchema, params);
+    return await this.payrollService.adjustAutomaticDeduction(
+      req.actor,
+      source,
+      id,
+      body,
     );
   }
   @Post('deductions')

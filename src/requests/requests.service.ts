@@ -14,6 +14,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SchedulesService } from '../schedules/schedules.service.js';
+import { DeductionPolicyService } from '../deduction-policy/deduction-policy.service.js';
 import { randomUUID } from 'node:crypto';
 import type { AttendanceRow } from '../attendance/attendance.mapper.js';
 import { attendance } from '../attendance/attendance.mapper.js';
@@ -49,6 +50,8 @@ export class RequestsService {
     private readonly attendanceService: AttendanceService,
     @Inject(AuditService)
     private readonly auditService: AuditService,
+    @Inject(DeductionPolicyService)
+    private readonly deductionPolicy: DeductionPolicyService,
   ) {}
   private get db() {
     return this.store.db;
@@ -459,6 +462,8 @@ export class RequestsService {
         decidedBy: null,
         decisionReason: null,
         salaryDeductionDays: null,
+        deductionPolicyApplied: undefined,
+        salaryDeductionAdjustment: undefined,
         lastChange: {
           action,
           reason,
@@ -507,7 +512,17 @@ export class RequestsService {
         throw new ForbiddenException(
           'The manager reviewer cannot give the final HR decision',
         );
-      if (before.type !== 'forgotten-check-out')
+      const rule = (await this.deductionPolicy.current()).requests[before.type];
+      const ruleDays =
+        input.status === 'approved' ? rule.approved : rule.rejected;
+      // Admins are exempt; forgotten check-out keeps its null contract unless a rule charges it.
+      const salaryDeductionDays =
+        (await this.employeesService.workflowEmployee(before.employeeId))
+          .role === 'admin' ||
+        (before.type === 'forgotten-check-out' && ruleDays === 0)
+          ? null
+          : ruleDays;
+      if (before.type !== 'forgotten-check-out' || salaryDeductionDays !== null)
         await requireUnlockedPayroll(
           this.db,
           localTime(
@@ -550,16 +565,8 @@ export class RequestsService {
         decidedAt: new Date().toISOString(),
         decidedBy: actor.name,
         decisionReason: input.reason,
-        salaryDeductionDays:
-          before.type === 'forgotten-check-out' ||
-          (await this.employeesService.workflowEmployee(before.employeeId))
-            .role === 'admin'
-            ? null
-            : input.status === 'approved'
-              ? before.type === 'mission'
-                ? 0
-                : 1
-              : 3,
+        salaryDeductionDays,
+        deductionPolicyApplied: salaryDeductionDays !== null,
       };
       await this.db
         .prepare(

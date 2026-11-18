@@ -30,5 +30,15 @@ export type EmployeeRequest = z.infer<typeof requestSchema> & {
   decidedBy: string | null;
   decisionReason: string | null;
   salaryDeductionDays: number | null;
+  /** True when the days came from the configurable deduction policy. */
+  deductionPolicyApplied?: boolean;
+  /** Set when HR/admin edits or removes the automatic deduction; keeps the original value. */
+  salaryDeductionAdjustment?: {
+    originalDays: number;
+    reason: string;
+    by: string;
+    byId: string;
+    at: string;
+  };
   attendance: Attendance | null;
 };
