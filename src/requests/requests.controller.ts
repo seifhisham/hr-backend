@@ -60,15 +60,10 @@ export class RequestsController {
     req: AuthRequest,
     @Query(new ZodValidationPipe(requestPageSchema))
     page: RequestPageDto,
-    @Res({ passthrough: true })
-    res: Response,
   ) {
-    const rows = await this.requestsService.managedRequests(req.actor, page);
-    total(
-      res,
-      await this.requestsService.managedRequestCount(req.actor, page.status),
-    );
-    return rows;
+    // No X-Total-Count here: counting would rebuild every pending workflow on
+    // each page. Pages are filled to `limit`, so a short page marks the end.
+    return await this.requestsService.managedRequests(req.actor, page);
   }
   @Patch(':id/manager-review')
   @Personal()

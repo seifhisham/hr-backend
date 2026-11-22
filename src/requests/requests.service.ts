@@ -118,14 +118,6 @@ export class RequestsService {
       .get(...(employeeId ? [employeeId] : []), ...(status ? [status] : []));
     return Number(row?.total ?? 0);
   }
-  /** Number of requests `managedRequests()` pages through. */
-  async managedRequestCount(
-    actor: Actor,
-    status?: RequestPageDto['status'],
-  ): Promise<number> {
-    if (status && status !== 'pending') return 0;
-    return (await this.managedRequests(actor)).length;
-  }
   /** One request for HR review; branch visibility is enforced by row security. */
   async request(actor: Actor, id: string): Promise<EmployeeRequest> {
     requireHr(actor);
