@@ -267,6 +267,8 @@ Each employee may reserve/use at most **240 minutes (4 hours)** through at most 
 
 ### Request withdrawal and correction
 
+- Request lists (`GET /api/requests`, `/api/requests/me`, `/api/requests/managed`) send an `X-Total-Count` response header: the number of matching requests across all pages for the same `status` filter, ignoring `limit` and `before`. The body is unchanged (a JSON array). `/api/requests/managed` fills each page up to `limit` after the direct-manager check, so a page shorter than `limit` means there are no more requests.
+- `GET /api/requests/:id`: HR/admin returns one request by UUID, with the same fields and workflow state as `GET /api/requests`. HR sees only requests in their assigned branches; a missing or hidden request returns 404. Used by the payroll deduction breakdown.
 - `PATCH /api/requests/:id/withdraw`: an authenticated employee can withdraw their own pending request. Body: `{ "reason": "No longer needed" }`.
 - `PATCH /api/requests/:id/reopen`: HR/admin can reopen another employee's approved time-off request for correction. Body: `{ "reason": "Dates need correction" }`. Approved forgotten check-outs must use the attendance correction API instead.
 - Both require a UUID request ID and a trimmed reason of 5–500 characters; extra body fields are rejected. Invalid input returns 400, forbidden actions 403, missing requests 404, and invalid state transitions 409.

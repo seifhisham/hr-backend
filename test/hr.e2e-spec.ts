@@ -3235,6 +3235,18 @@ describe('HR REST API', () => {
       .set(auth(employeeToken))
       .expect(200);
     expect(mine.body).toHaveLength(1);
+    expect(mine.headers['x-total-count']).toBe('1');
+    const hrPage = await request(server())
+      .get('/api/requests?limit=1&status=pending')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(hrPage.body).toHaveLength(1);
+    expect(Number(hrPage.headers['x-total-count'])).toBeGreaterThanOrEqual(1);
+    const none = await request(server())
+      .get('/api/requests?status=withdrawn')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(none.headers['x-total-count']).toBe(String(none.body.length));
     const before = await request(server())
       .get('/api/attendance?from=2026-10-04&to=2026-10-05')
       .set(auth(adminToken))
@@ -3254,6 +3266,24 @@ describe('HR REST API', () => {
       .expect(200);
     expect(approved.body.decidedBy).toBe('Company Administrator');
     expect(approved.body.salaryDeductionDays).toBe(1);
+    const single = await request(server())
+      .get(`/api/requests/${pending.id}`)
+      .set(auth(adminToken))
+      .expect(200);
+    expect(single.body).toMatchObject({
+      id: pending.id,
+      status: 'approved',
+      reason: 'Family appointment',
+      decisionReason: 'Approved for time off',
+    });
+    await request(server())
+      .get(`/api/requests/${pending.id}`)
+      .set(auth(employeeToken))
+      .expect(403);
+    await request(server())
+      .get('/api/requests/00000000-0000-4000-8000-000000000000')
+      .set(auth(adminToken))
+      .expect(404);
     const after = await request(server())
       .get(
         '/api/attendance?from=2026-10-04&to=2026-10-05&status=Approved%20leave',

@@ -9,7 +9,9 @@ import {
   Post,
   Query,
   Req,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { z } from 'zod';
 import type { AuthRequest } from '../auth/types/auth-request.type.js';
 import { parse } from '../common/validation/parse.js';
@@ -24,6 +26,10 @@ import {
   type SubmitRequestDto,
 } from './dto/request.dto.js';
 import { RequestsService } from './requests.service.js';
+/** Total matching requests across all pages; the body stays a plain array. */
+function total(res: Response, count: number) {
+  res.setHeader('X-Total-Count', String(count));
+}
 @Controller('api/requests')
 export class RequestsController {
   constructor(
@@ -37,8 +43,15 @@ export class RequestsController {
     req: AuthRequest,
     @Query(new ZodValidationPipe(requestPageSchema))
     page: RequestPageDto,
+    @Res({ passthrough: true })
+    res: Response,
   ) {
-    return await this.requestsService.requests(req.actor, true, page);
+    const rows = await this.requestsService.requests(req.actor, true, page);
+    total(
+      res,
+      await this.requestsService.requestCount(req.actor, true, page.status),
+    );
+    return rows;
   }
   @Get('managed')
   @Personal()
@@ -47,8 +60,15 @@ export class RequestsController {
     req: AuthRequest,
     @Query(new ZodValidationPipe(requestPageSchema))
     page: RequestPageDto,
+    @Res({ passthrough: true })
+    res: Response,
   ) {
-    return await this.requestsService.managedRequests(req.actor, page);
+    const rows = await this.requestsService.managedRequests(req.actor, page);
+    total(
+      res,
+      await this.requestsService.managedRequestCount(req.actor, page.status),
+    );
+    return rows;
   }
   @Patch(':id/manager-review')
   @Personal()
@@ -72,8 +92,24 @@ export class RequestsController {
     req: AuthRequest,
     @Query(new ZodValidationPipe(requestPageSchema))
     page: RequestPageDto,
+    @Res({ passthrough: true })
+    res: Response,
   ) {
-    return await this.requestsService.requests(req.actor, false, page);
+    const rows = await this.requestsService.requests(req.actor, false, page);
+    total(
+      res,
+      await this.requestsService.requestCount(req.actor, false, page.status),
+    );
+    return rows;
+  }
+  @Get(':id')
+  async request(
+    @Req()
+    req: AuthRequest,
+    @Param('id')
+    id: string,
+  ) {
+    return await this.requestsService.request(req.actor, parse(z.uuid(), id));
   }
   @Post()
   @Personal()

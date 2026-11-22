@@ -99,6 +99,42 @@ export class RequestsService {
       ),
     );
   }
+  /** Number of requests `requests()` pages through, for page totals. */
+  async requestCount(
+    actor: Actor,
+    own = false,
+    status?: RequestPageDto['status'],
+  ): Promise<number> {
+    if (!own) requireHr(actor);
+    const employeeId = own
+      ? (await this.employeesService.employeeActor(actor)).id
+      : undefined;
+    const row = await this.db
+      .prepare(
+        `SELECT COUNT(*) AS total FROM employee_requests WHERE 1 = 1
+          ${employeeId ? 'AND employee_id = ?' : ''}
+          ${status ? 'AND status = ?' : ''}`,
+      )
+      .get(...(employeeId ? [employeeId] : []), ...(status ? [status] : []));
+    return Number(row?.total ?? 0);
+  }
+  /** Number of requests `managedRequests()` pages through. */
+  async managedRequestCount(
+    actor: Actor,
+    status?: RequestPageDto['status'],
+  ): Promise<number> {
+    if (status && status !== 'pending') return 0;
+    return (await this.managedRequests(actor)).length;
+  }
+  /** One request for HR review; branch visibility is enforced by row security. */
+  async request(actor: Actor, id: string): Promise<EmployeeRequest> {
+    requireHr(actor);
+    const row = await this.db
+      .prepare('SELECT data FROM employee_requests WHERE id = ?')
+      .get(id);
+    if (!row) throw new NotFoundException('Request not found');
+    return await this.workflow(JSON.parse(row.data as string) as EmployeeRequest);
+  }
   async workflow(
     request: EmployeeRequest,
     profiles = new Map<
@@ -156,7 +192,8 @@ export class RequestsService {
           Pick<Employee, 'id' | 'managerId' | 'department' | 'active' | 'role'>
         >
     >();
-    return (
+    const employeeId = actor.employeeId;
+    const read = async (before: string | undefined) =>
       await Promise.all(
         (
           await this.db
@@ -165,14 +202,14 @@ export class RequestsService {
           AND employee_id IN (SELECT id FROM employees WHERE (data::jsonb->>'managerId') = ?)
           AND EXISTS (SELECT 1 FROM employees WHERE id = ? AND (data::jsonb->>'active') = 'true' AND (data::jsonb->>'role') IN ('manager', 'hr', 'admin'))
           AND employee_id != ?
-          ${page?.before ? 'AND row_order < (SELECT row_order FROM employee_requests WHERE id = ?)' : ''}
+          ${before ? 'AND row_order < (SELECT row_order FROM employee_requests WHERE id = ?)' : ''}
           ORDER BY row_order DESC ${page ? 'LIMIT ?' : ''}`,
             )
             .all(
-              actor.employeeId,
-              actor.employeeId,
-              actor.employeeId,
-              ...(page?.before ? [page.before] : []),
+              employeeId,
+              employeeId,
+              employeeId,
+              ...(before ? [before] : []),
               ...(page ? [page.limit] : []),
             )
         ).map(
@@ -182,8 +219,21 @@ export class RequestsService {
               profiles,
             ),
         ),
-      )
-    ).filter((request) => request.managerEmployeeId === actor.employeeId);
+      );
+    const mine = (request: EmployeeRequest) =>
+      request.managerEmployeeId === employeeId;
+    if (!page) return (await read(undefined)).filter(mine);
+    // The manager check runs after the SQL limit, so keep reading until the
+    // page is full; a short page then reliably means the queue has ended.
+    const result: EmployeeRequest[] = [];
+    let before = page.before;
+    while (result.length < page.limit) {
+      const batch = await read(before);
+      result.push(...batch.filter(mine));
+      if (batch.length < page.limit) break;
+      before = batch[batch.length - 1].id;
+    }
+    return result.slice(0, page.limit);
   }
   async reviewRequest(actor: Actor, id: string, input: RequestDecisionDto) {
     return await this.store.transaction(async () => {
