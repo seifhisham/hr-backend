@@ -9,6 +9,11 @@ export const requestPageSchema = z
   })
   .strict();
 export type RequestPageDto = z.infer<typeof requestPageSchema>;
+/** The HR queue alone may be narrowed to one employee. */
+export const hrRequestPageSchema = requestPageSchema
+  .extend({ employeeId: z.uuid().optional() })
+  .strict();
+export type HrRequestPageDto = z.infer<typeof hrRequestPageSchema>;
 
 const attachments = z
   .array(

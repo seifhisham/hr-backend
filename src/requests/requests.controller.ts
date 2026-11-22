@@ -21,6 +21,8 @@ import {
   requestChangeSchema,
   requestSchema,
   requestPageSchema,
+  hrRequestPageSchema,
+  type HrRequestPageDto,
   type RequestPageDto,
   type RequestDecisionDto,
   type SubmitRequestDto,
@@ -85,15 +87,20 @@ export class RequestsController {
   async requests(
     @Req()
     req: AuthRequest,
-    @Query(new ZodValidationPipe(requestPageSchema))
-    page: RequestPageDto,
+    @Query(new ZodValidationPipe(hrRequestPageSchema))
+    page: HrRequestPageDto,
     @Res({ passthrough: true })
     res: Response,
   ) {
     const rows = await this.requestsService.requests(req.actor, false, page);
     total(
       res,
-      await this.requestsService.requestCount(req.actor, false, page.status),
+      await this.requestsService.requestCount(
+        req.actor,
+        false,
+        page.status,
+        page.employeeId,
+      ),
     );
     return rows;
   }

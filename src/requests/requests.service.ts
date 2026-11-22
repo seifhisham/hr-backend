@@ -33,6 +33,7 @@ import type {
   RequestDecisionDto,
   SubmitRequestDto,
   RequestPageDto,
+  HrRequestPageDto,
 } from './dto/request.dto.js';
 import type { EmployeeRequest } from './types/employee-request.type.js';
 @Injectable()
@@ -59,7 +60,7 @@ export class RequestsService {
   async requests(
     actor: Actor,
     own = false,
-    page?: RequestPageDto,
+    page?: RequestPageDto | HrRequestPageDto,
   ): Promise<EmployeeRequest[]> {
     if (!own) requireHr(actor);
     const profiles = new Map<
@@ -73,7 +74,9 @@ export class RequestsService {
       ? await this.employeesService.employeeActor(actor)
       : null;
     if (employee) profiles.set(employee.id, employee);
-    const employeeId = employee?.id;
+    const employeeId =
+      employee?.id ??
+      (page && 'employeeId' in page ? page.employeeId : undefined);
     return await Promise.all(
       (
         await this.db
@@ -104,11 +107,12 @@ export class RequestsService {
     actor: Actor,
     own = false,
     status?: RequestPageDto['status'],
+    filterEmployeeId?: string,
   ): Promise<number> {
     if (!own) requireHr(actor);
     const employeeId = own
       ? (await this.employeesService.employeeActor(actor)).id
-      : undefined;
+      : filterEmployeeId;
     const row = await this.db
       .prepare(
         `SELECT COUNT(*) AS total FROM employee_requests WHERE 1 = 1

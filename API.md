@@ -178,6 +178,8 @@ Login now accepts company code as `workspace` (lowercase letters/digits/hyphens,
 
 `GET /requests`, `GET /requests/me`, and `GET /requests/managed` return arrays ordered newest first. Each response defaults to 50 items. Use `limit` (integer 1–100), optional `status` (`pending`, `approved`, `rejected`, `withdrawn`), and optional `before` (the last request UUID from the previous page). Example: `/requests/me?limit=50&status=pending&before=<last-id>`. Keep the same filters while paging. A page shorter than `limit` ends the list; a full page may require one more read to determine the end. An unknown or deleted cursor returns an empty page. Unknown query fields and invalid values return 400.
 
+`GET /requests` (HR/admin only) also accepts optional `employeeId` (UUID) to list one employee's requests; `X-Total-Count` follows the filter and branch visibility still applies. `/requests/me` and `/requests/managed` reject this field with 400.
+
 Filters and authorization are applied before the limit. Managed lists contain only current direct reports' pending requests; other status filters return an empty array. Refresh from the first page after mutations or assignment changes. New submissions do not shift existing cursors, but live status/assignment changes can alter later pages; this is not a frozen snapshot. Clients must follow cursors to retrieve complete history. Dashboard reports fetch all pages; page-level counts and deduction sums are labeled accordingly. Internal payroll calculation still uses the complete request set.
 
 

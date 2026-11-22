@@ -3242,6 +3242,28 @@ describe('HR REST API', () => {
       .expect(200);
     expect(hrPage.body).toHaveLength(1);
     expect(Number(hrPage.headers['x-total-count'])).toBeGreaterThanOrEqual(1);
+    const forEmployee = await request(server())
+      .get(`/api/requests?employeeId=${employee.id}`)
+      .set(auth(adminToken))
+      .expect(200);
+    expect(forEmployee.body.map((r: { id: string }) => r.id)).toEqual([
+      pending.id,
+    ]);
+    expect(forEmployee.headers['x-total-count']).toBe('1');
+    const forNobody = await request(server())
+      .get('/api/requests?employeeId=00000000-0000-4000-8000-000000000000')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(forNobody.body).toEqual([]);
+    expect(forNobody.headers['x-total-count']).toBe('0');
+    await request(server())
+      .get(`/api/requests?employeeId=${employee.id}`)
+      .set(auth(employeeToken))
+      .expect(403);
+    await request(server())
+      .get(`/api/requests/me?employeeId=${employee.id}`)
+      .set(auth(employeeToken))
+      .expect(400);
     const none = await request(server())
       .get('/api/requests?status=withdrawn')
       .set(auth(adminToken))
