@@ -57,12 +57,8 @@ it('initializes once with ADC and sends generic Android notification plus string
 });
 
 it.each([
-  ['employee-checked-in', 'Direct report checked in', 'Ahmed Ali checked in'],
-  [
-    'employee-checked-out',
-    'Direct report checked out',
-    'Ahmed Ali checked out',
-  ],
+  ['employee-checked-in', 'Ahmed Ali checked in', 'Employee check-in'],
+  ['employee-checked-out', 'Ahmed Ali checked out', 'Direct report check-out'],
   [
     'missing-check-out',
     'Missing check-out',

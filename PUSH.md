@@ -184,7 +184,13 @@ The recipient must be the employee's current direct manager, with an active
 manager/HR/admin profile; HR branch grants still apply. The latest 100 eligible
 attendance audit events are included, with stable audit IDs and normal read tracking.
 Reassignment removes the former manager's eligibility and exposes that history to
-the new manager. Attendance push previews show the inbox title and message, including
+the new manager.
+Company admins (role `admin`) additionally receive `employee-checked-in` and
+`employee-checked-out` for **every** employee except themselves, whether or not they
+have an employee profile (title `<employee name> checked in/out`, body `Employee check-in/check-out`,
+or `Direct report ...` for their own reports); same latest-100 window and audit IDs, so no duplicates. Check-in/out
+**pushes** are only enqueued for events from the last hour (matching the FCM TTL), so a
+newly registered device is not flooded with history; older ones stay in the inbox. Attendance push previews show the inbox title and message, including
 the employee name for check-in/check-out and the employee name, work date and timezone
 for missing check-out. Request push previews retain generic text.
 No HR workflow calls Firebase, and an HR commit never depends on successful push.

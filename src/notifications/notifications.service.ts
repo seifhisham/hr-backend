@@ -41,11 +41,29 @@ export class NotificationsService {
   }> {
     const db = this.store.db;
     const items: Notification[] = [];
-    if (actor.employeeId && ['manager', 'hr', 'admin'].includes(actor.role)) {
+    // Company admins receive every employee's check-in/check-out; other
+    // managers (including HR) only their active direct reports'.
+    const allAttendance = actor.role === 'admin';
+    if (
+      allAttendance ||
+      (actor.employeeId && ['manager', 'hr'].includes(actor.role))
+    ) {
+      const self = actor.employeeId ?? '';
       for (const row of await db
         .prepare(
-          `
-        SELECT a.id,a.at,a.action,a.record_id,e.data::jsonb->>'name' AS employee_name
+          allAttendance
+            ? `
+        SELECT a.id,a.at,a.action,a.record_id,e.data::jsonb->>'name' AS employee_name,
+          (e.data::jsonb->>'managerId') IS NOT DISTINCT FROM ? AS direct_report
+        FROM audit a JOIN attendance t ON t.id=a.record_id
+        JOIN employees e ON e.id=t.employee_id
+        WHERE a.action IN ('attendance.checked_in','attendance.checked_out','attendance.auto_checked_out')
+          AND e.id<>?
+        ORDER BY a.row_order DESC LIMIT 100
+      `
+            : `
+        SELECT a.id,a.at,a.action,a.record_id,e.data::jsonb->>'name' AS employee_name,
+          true AS direct_report
         FROM audit a JOIN attendance t ON t.id=a.record_id
         JOIN employees e ON e.id=t.employee_id
         JOIN employees m ON m.id=?
@@ -56,14 +74,17 @@ export class NotificationsService {
         ORDER BY a.row_order DESC LIMIT 100
       `,
         )
-        .all(actor.employeeId, actor.employeeId, actor.employeeId)) {
+        .all(...(allAttendance ? [self, self] : [self, self, self]))) {
         const checkedIn = row.action === 'attendance.checked_in';
         const action = checkedIn ? 'checked in' : 'checked out';
+        const direct = row.direct_report === true || row.direct_report === 1;
         items.push({
           id: row.id as string,
           type: checkedIn ? 'employee-checked-in' : 'employee-checked-out',
-          title: `Direct report ${action}`,
-          message: `${row.employee_name as string} ${action}`,
+          // The employee's name leads the title so it is visible even in a
+          // collapsed push notification.
+          title: `${row.employee_name as string} ${action}`,
+          message: `${direct && actor.employeeId ? 'Direct report' : 'Employee'} ${checkedIn ? 'check-in' : 'check-out'}`,
           createdAt: row.at as string,
           readAt: null,
           attendanceId: row.record_id as string,

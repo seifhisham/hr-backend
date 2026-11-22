@@ -89,7 +89,20 @@ export class PushWorker {
         await this.asRecipient(device, async (actor) => {
           const { items } = await this.notifications.list(actor);
           await this.store.transaction(async () => {
-            for (const item of items.filter((item) => !item.readAt)) {
+            // Check-in/out alerts are only useful while fresh; skip stale ones so a
+            // newly registered device (e.g. an admin seeing all employees) is not
+            // flooded with history. They remain in the inbox.
+            const freshAfter = new Date(Date.now() - 3600000).toISOString();
+            const pushable = items.filter(
+              (item) =>
+                !item.readAt &&
+                !(
+                  (item.type === 'employee-checked-in' ||
+                    item.type === 'employee-checked-out') &&
+                  item.createdAt < freshAfter
+                ),
+            );
+            for (const item of pushable) {
               // The inbox sources (audit/request/attendance) are already committed.
               // Persist a minimal inbox event and its delivery together before any network call.
               await this.store

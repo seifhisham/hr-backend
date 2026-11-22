@@ -680,7 +680,7 @@ async function directReportAttendance() {
   return { manager, other, report, capture, inboxFor };
 }
 
-it('notifies only the direct manager for real check-in/check-out, with stable IDs, read tracking and no duplicate pushes', async () => {
+it('notifies the direct manager and company admins for real check-in/check-out, with stable IDs, read tracking and no duplicate pushes', async () => {
   const { capture, inboxFor } = await directReportAttendance();
   const send = vi.spyOn(app.get(FirebaseSender), 'send').mockResolvedValue();
   const record = (await capture('/api/attendance/check-in').expect(201)).body;
@@ -690,10 +690,22 @@ it('notifies only the direct manager for real check-in/check-out, with stable ID
   expect(items[0]).toMatchObject({
     type: 'employee-checked-in',
     attendanceId: record.id,
-    message: 'direct-report checked in',
+    title: 'direct-report checked in',
+    message: 'Direct report check-in',
     readAt: null,
   });
-  for (const name of ['other-manager', 'direct-report', 'session-a'])
+  const adminItems = (await inboxFor('session-a')).filter(
+    (item) => item.type === 'employee-checked-in',
+  );
+  expect(adminItems).toEqual([
+    expect.objectContaining({
+      id: items[0].id,
+      title: 'direct-report checked in',
+      message: 'Employee check-in',
+      attendanceId: record.id,
+    }),
+  ]);
+  for (const name of ['other-manager', 'direct-report'])
     expect(
       (await inboxFor(name)).filter(
         (item) => item.type === 'employee-checked-in',
@@ -706,17 +718,29 @@ it('notifies only the direct manager for real check-in/check-out, with stable ID
       ([, , type]) =>
         type === 'employee-checked-in' || type === 'employee-checked-out',
     );
-  expect(attendanceSends()).toEqual([
-    [
-      token + '-attendance-manager',
-      items[0].id,
-      'employee-checked-in',
-      {
-        title: items[0].title,
-        message: 'direct-report checked in',
-      },
-    ],
-  ]);
+  expect(attendanceSends()).toHaveLength(2);
+  expect(attendanceSends()).toEqual(
+    expect.arrayContaining([
+      [
+        token + '-attendance-manager',
+        items[0].id,
+        'employee-checked-in',
+        {
+          title: 'direct-report checked in',
+          message: 'Direct report check-in',
+        },
+      ],
+      [
+        token,
+        items[0].id,
+        'employee-checked-in',
+        {
+          title: 'direct-report checked in',
+          message: 'Employee check-in',
+        },
+      ],
+    ]),
+  );
   await request(http())
     .patch(`/api/notifications/${items[0].id}/read`)
     .set(auth('other-manager'))
@@ -729,9 +753,17 @@ it('notifies only the direct manager for real check-in/check-out, with stable ID
   await capture(`/api/attendance/${record.id}/check-out`).expect(201);
   await capture(`/api/attendance/${record.id}/check-out`).expect(201);
   await worker.sweep();
-  expect(attendanceSends()).toHaveLength(2);
-  expect(attendanceSends()[1][0]).toBe(token + '-attendance-manager');
-  expect(attendanceSends()[1][2]).toBe('employee-checked-out');
+  expect(attendanceSends()).toHaveLength(4);
+  expect(
+    attendanceSends()
+      .slice(2)
+      .map(([value, , type]) => [value, type]),
+  ).toEqual(
+    expect.arrayContaining([
+      [token + '-attendance-manager', 'employee-checked-out'],
+      [token, 'employee-checked-out'],
+    ]),
+  );
   expect(
     (await inboxFor('attendance-manager')).filter(
       (item) => item.type === 'employee-checked-out',
@@ -762,7 +794,9 @@ it('cancels a previous manager retry after reassignment and prevents cross-compa
   await worker.sweep();
   expect(
     send.mock.calls
-      .filter(([, , type]) => type === 'employee-checked-in')
+      .filter(
+        ([value, , type]) => type === 'employee-checked-in' && value !== token,
+      )
       .map(([value]) => value),
   ).toEqual([token + '-attendance-manager', token + '-other-manager']);
   expect(
@@ -801,7 +835,8 @@ it('notifies a manager for automatic checkout without exposing location in the n
   expect(items.filter((item) => item.type === 'employee-checked-out')).toEqual([
     expect.objectContaining({
       attendanceId: record.id,
-      message: 'direct-report checked out',
+      title: 'direct-report checked out',
+      message: 'Direct report check-out',
     }),
   ]);
   const send = vi.spyOn(app.get(FirebaseSender), 'send').mockResolvedValue();
@@ -809,5 +844,6 @@ it('notifies a manager for automatic checkout without exposing location in the n
   expect(send.mock.calls.map(([, , type]) => type)).toEqual(
     expect.arrayContaining(['employee-checked-in', 'employee-checked-out']),
   );
-  expect(send).toHaveBeenCalledTimes(2);
+  // The direct manager and the company admin each receive both alerts.
+  expect(send).toHaveBeenCalledTimes(4);
 });
