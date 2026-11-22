@@ -1834,20 +1834,35 @@ describe('HR REST API', () => {
     const record = (
       await submit('/api/attendance/check-in', employeeToken).expect(201)
     ).body;
-    expect(
-      (
-        await request(server())
-          .get('/api/notifications')
-          .set(auth(adminToken))
-          .expect(200)
-      ).body.unreadCount,
-    ).toBe(0);
+    // Company admins see every employee's check-in; ignore those alerts when
+    // checking the missing check-out rules below.
+    const nonAttendance = (items: { type: string }[]) =>
+      items.filter(
+        (item) =>
+          item.type !== 'employee-checked-in' &&
+          item.type !== 'employee-checked-out',
+      );
+    const beforeShiftEnd = (
+      await request(server())
+        .get('/api/notifications')
+        .set(auth(adminToken))
+        .expect(200)
+    ).body;
+    expect(beforeShiftEnd.items).toEqual([
+      expect.objectContaining({
+        type: 'employee-checked-in',
+        attendanceId: record.id,
+      }),
+    ]);
+    expect(nonAttendance(beforeShiftEnd.items)).toHaveLength(0);
     vi.setSystemTime(new Date('2026-10-04T16:00:00Z'));
     const inbox = await request(server())
       .get('/api/notifications')
       .set(auth(adminToken))
       .expect(200);
-    expect(inbox.body.items[0]).toMatchObject({
+    const missing = nonAttendance(inbox.body.items);
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toMatchObject({
       type: 'missing-check-out',
       attendanceId: record.id,
     });
@@ -1861,7 +1876,7 @@ describe('HR REST API', () => {
     ).toHaveLength(0);
     await request(server())
       .patch(
-        `/api/notifications/${encodeURIComponent(inbox.body.items[0].id)}/read`,
+        `/api/notifications/${encodeURIComponent(missing[0].id)}/read`,
       )
       .set(auth(adminToken))
       .send({})
@@ -1876,12 +1891,14 @@ describe('HR REST API', () => {
       })
       .expect(200);
     expect(
-      (
-        await request(server())
-          .get('/api/notifications')
-          .set(auth(adminToken))
-          .expect(200)
-      ).body.items,
+      nonAttendance(
+        (
+          await request(server())
+            .get('/api/notifications')
+            .set(auth(adminToken))
+            .expect(200)
+        ).body.items,
+      ),
     ).toHaveLength(0);
   });
   it('uses the recorded overnight shift and timezone for missing check-out notifications', async () => {
