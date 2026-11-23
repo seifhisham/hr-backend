@@ -420,6 +420,48 @@ describe('Absence deductions', () => {
       days: 0,
       reason: 'Inside my branch',
     }, hrB.token).expect(200);
+
+    const hrA = await person('HR-ONLY-A', 'hr', branchA);
+    await request(http())
+      .patch(`/api/hr-accounts/${hrA.userId}/branches`)
+      .set(auth(adminToken))
+      .send({ branchIds: [branchA], reason: 'First branch responsibility' })
+      .expect(200);
+    const auditFor = async (token: string, id: string, date: string) =>
+      (
+        await request(http())
+          .get(`/api/audit?recordId=${encodeURIComponent(`${id}:${date}`)}`)
+          .set(auth(token))
+          .expect(200)
+      ).body as { action: string; reason: string }[];
+    expect(await auditFor(hrB.token, transferred.id, '2026-10-04')).toEqual([
+      expect.objectContaining({
+        action: 'payroll.absence.deduction_removed',
+        reason: 'Inside my branch',
+      }),
+    ]);
+    expect(await auditFor(hrA.token, transferred.id, '2026-10-04')).toEqual([]);
+    expect(
+      await auditFor(adminToken, transferred.id, '2026-10-04'),
+    ).toHaveLength(1);
+
+    // A mid-month transfer hides the month from HR with only one of the branches.
+    const moved = await store
+      .prepare('SELECT data FROM employees WHERE id = ?')
+      .get(otherBranch.id);
+    await store
+      .prepare(
+        'INSERT INTO employee_branches (employee_id,branch_id,effective_from,employee_snapshot) VALUES (?,?,?,?)',
+      )
+      .run(otherBranch.id, branchB, '2026-10-10', moved!.data as string);
+    await adjust(otherBranch.id, '2026-10-11', {
+      days: 0,
+      reason: 'Admin reviewed transfer',
+    }).expect(200);
+    expect(await auditFor(hrB.token, otherBranch.id, '2026-10-11')).toEqual([]);
+    expect(
+      await auditFor(adminToken, otherBranch.id, '2026-10-11'),
+    ).toHaveLength(1);
   });
 
   it('never changes an approved run, including runs saved before this rule', async () => {
