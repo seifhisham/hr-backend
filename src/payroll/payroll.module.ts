@@ -4,6 +4,7 @@ import { AuditModule } from '../audit/audit.module.js';
 import { DatabaseModule } from '../database/database.module.js';
 import { CompanyModule } from '../company/company.module.js';
 import { EmployeesModule } from '../employees/employees.module.js';
+import { SchedulesModule } from '../schedules/schedules.module.js';
 import { PayrollController } from './payroll.controller.js';
 import { PayrollService } from './payroll.service.js';
 
@@ -12,6 +13,7 @@ import { PayrollService } from './payroll.service.js';
     DeductionPolicyModule,
     CompanyModule,
     EmployeesModule,
+    SchedulesModule,
     DatabaseModule,
     AuditModule,
   ],

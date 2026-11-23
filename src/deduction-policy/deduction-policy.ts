@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { dateSchema } from '../common/validation/schemas.js';
 
 // Salary days are configured in quarter-day steps so payroll sums stay exact.
 const days = z.number().min(0).max(30).multipleOf(0.25);
@@ -15,6 +16,17 @@ export const requestRuleTypes = [
   'forgotten-check-out',
 ] as const;
 export type RequestRuleType = (typeof requestRuleTypes)[number];
+
+const absenceRuleSchema = z
+  .object({
+    enabled: z.boolean(),
+    daysPerAbsence: days,
+    // Can only move an employee's start later than their first check-in.
+    effectiveFrom: dateSchema.nullable(),
+    excludedDates: z.array(dateSchema).max(1000),
+  })
+  .strict();
+export type AbsenceRule = z.infer<typeof absenceRuleSchema>;
 
 export const deductionPolicySchema = z
   .object({
@@ -54,6 +66,8 @@ export const deductionPolicySchema = z
         (late) => !late.enabled || late.tiers.length > 0,
         'Add at least one lateness tier or turn late-arrival deductions off',
       ),
+    // Optional so clients that predate this rule can still save the policy.
+    absence: absenceRuleSchema.optional(),
   })
   .strict();
 export type DeductionPolicyRules = z.infer<typeof deductionPolicySchema>;
@@ -68,7 +82,8 @@ export type UpdateDeductionPolicyDto = z.infer<
   typeof updateDeductionPolicySchema
 >;
 
-export type DeductionPolicy = DeductionPolicyRules & {
+export type DeductionPolicy = Omit<DeductionPolicyRules, 'absence'> & {
+  absence: AbsenceRule;
   updatedAt: string | null;
   updatedBy: string | null;
 };
@@ -95,6 +110,12 @@ export const defaultDeductionPolicy: DeductionPolicy = {
       { fromMinutes: 1, days: 0.25 },
       { fromMinutes: 60, days: 0.5 },
     ],
+  },
+  absence: {
+    enabled: false,
+    daysPerAbsence: 1,
+    effectiveFrom: null,
+    excludedDates: [],
   },
   updatedAt: null,
   updatedBy: null,

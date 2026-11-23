@@ -16,6 +16,7 @@ import {
 } from '@nestjs/common';
 import { ZodValidationPipe } from '../common/validation/zod-validation.pipe.js';
 import {
+  absenceDeductionParamsSchema,
   adjustDeductionSchema,
   automaticDeductionParamsSchema,
   type AdjustDeductionDto,
@@ -117,6 +118,35 @@ export class PayrollController {
       source,
       id,
       body,
+    );
+  }
+  @Patch('absence-deductions/:employeeId/:workDate')
+  async adjustAbsenceDeduction(
+    @Req() req: AuthRequest,
+    @Param() params: unknown,
+    @Body(new ZodValidationPipe(adjustDeductionSchema))
+    body: AdjustDeductionDto,
+  ) {
+    const { employeeId, workDate } = parse(
+      absenceDeductionParamsSchema,
+      params,
+    );
+    return await this.payrollService.adjustAbsenceDeduction(
+      req.actor,
+      employeeId,
+      workDate,
+      body,
+    );
+  }
+  @RateLimit('reports')
+  @Get('never-checked-in')
+  async neverCheckedIn(
+    @Req() req: AuthRequest,
+    @Query('month') month: unknown,
+  ) {
+    return await this.payrollService.neverCheckedIn(
+      req.actor,
+      parse(payrollMonthSchema, month),
     );
   }
   @Post('deductions')

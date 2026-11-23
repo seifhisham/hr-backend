@@ -34,6 +34,11 @@ export const automaticDeductionParamsSchema = z.object({
   id: z.uuid(),
 });
 
+export const absenceDeductionParamsSchema = z.object({
+  employeeId: z.uuid(),
+  workDate: dateSchema,
+});
+
 export const deductionRangeSchema = z
   .object({ from: dateSchema, to: dateSchema })
   .strict()

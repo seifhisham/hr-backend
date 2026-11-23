@@ -24,6 +24,8 @@ export type PayrollRow = {
   manualDeductions: PayrollDeduction[];
   /** Absent from payroll approved before late-arrival rules existed. */
   lateDeductions?: LateDeduction[];
+  /** Present only when the absence rule was on for this payroll. */
+  absenceDeductions?: AbsenceDeduction[];
 };
 /** A logged HR/admin change to an automatically applied deduction. */
 export type DeductionAdjustment = {
@@ -43,9 +45,32 @@ export type LateDeduction = {
   exemption: 'free-allowance' | 'approved-request' | null;
   adjustment?: DeductionAdjustment | null;
 };
+/** A scheduled workday with no attendance, keyed by employee and work date. */
+export type AbsenceDeduction = {
+  workDate: string;
+  status: 'absent' | 'held' | 'covered';
+  cause:
+    | 'no-record'
+    | 'pending-request'
+    | 'approved-excuse'
+    | 'rejected-request';
+  requestType: string | null;
+  automaticDays: number;
+  days: number;
+  adjustment: DeductionAdjustment | null;
+};
+/** An employee with no attendance at all; informational and never charged. */
+export type NeverCheckedIn = {
+  employeeId: string;
+  employeeName: string;
+  employeeNumber: string;
+  department: string;
+  branchName: string | null;
+  startDate: string;
+};
 /** One automatically applied deduction, as listed for HR review. */
 export type AutomaticDeduction = {
-  source: 'request' | 'late';
+  source: 'request' | 'late' | 'absence';
   id: string;
   employeeId: string;
   employeeName: string;
@@ -57,6 +82,12 @@ export type AutomaticDeduction = {
   days: number;
   adjustment: DeductionAdjustment | null;
   locked: boolean;
+  /** Absence rows only. */
+  workDate?: string;
+  absenceStatus?: AbsenceDeduction['status'];
+  absenceCause?: AbsenceDeduction['cause'];
+  requestType?: string | null;
+  editable?: boolean;
 };
 export type PayrollRun = {
   month: string;

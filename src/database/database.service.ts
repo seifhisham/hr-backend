@@ -202,6 +202,17 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return `EMP-${String(row!.value).padStart(6, '0')}`;
   }
 
+  /**
+   * Read-only, company-wide read outside the actor's branch scope, for server
+   * calculations that need full history. Callers must return only values
+   * derived for employees the actor is already allowed to see.
+   */
+  companyRead<T>(work: () => Promise<T>): Promise<T> {
+    return companyContext.run({ companyId: this.companyId }, () =>
+      this.transaction(work, true),
+    );
+  }
+
   snapshot<T>(work: () => Promise<T>): Promise<T> {
     return this.transaction(work, true);
   }

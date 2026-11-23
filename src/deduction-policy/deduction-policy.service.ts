@@ -35,6 +35,7 @@ export class DeductionPolicyService {
         ...defaultDeductionPolicy.lateArrival,
         ...saved.lateArrival,
       },
+      absence: { ...defaultDeductionPolicy.absence, ...saved.absence },
     };
   }
 
@@ -47,8 +48,14 @@ export class DeductionPolicyService {
     requireHr(actor);
     return await this.store.transaction(async () => {
       const before = await this.current();
+      // Clients that predate the absence rule omit it; keep what is saved.
+      const absence = input.rules.absence ?? before.absence;
       const after: DeductionPolicy = {
         ...input.rules,
+        absence: {
+          ...absence,
+          excludedDates: [...new Set(absence.excludedDates)].sort(),
+        },
         lateArrival: {
           ...input.rules.lateArrival,
           tiers: [...input.rules.lateArrival.tiers].sort(

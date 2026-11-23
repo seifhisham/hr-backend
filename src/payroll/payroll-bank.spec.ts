@@ -6,6 +6,7 @@ import type { CompanyService } from '../company/company.service.js';
 import type { DatabaseService } from '../database/database.service.js';
 import type { AuditService } from '../audit/audit.service.js';
 import type { Actor } from '../common/types/actor.type.js';
+import type { SchedulesService } from '../schedules/schedules.service.js';
 
 const actor = { id: 'hr-user', role: 'hr', companyId: 'company' } as Actor;
 const employeeId = '11111111-1111-4111-8111-111111111111';
@@ -47,6 +48,7 @@ beforeEach(() => {
     } as unknown as DatabaseService,
     { record } as unknown as AuditService,
     {} as DeductionPolicyService,
+    {} as SchedulesService,
   );
 });
 const input = (): BankDetails => ({
