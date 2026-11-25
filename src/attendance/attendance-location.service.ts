@@ -45,6 +45,14 @@ type Tracking = {
   distanceMeters: number | null;
   accuracyMeters: number | null;
   autoCheckedOutAt: string | null;
+  /**
+   * Time of the latest reliable fix in an unbroken chain of fresh fixes that
+   * began with check-in or a reliable inside reading; null once coverage
+   * breaks. Departure is only confirmed (and checkout automated) while this
+   * chain is intact, so a reading taken after a coverage gap cannot stamp
+   * the employee's unknown departure time with "now". Server-only.
+   */
+  trackedAt?: string | null;
   actor: Actor;
 };
 @Injectable()
@@ -100,6 +108,7 @@ export class AttendanceLocationService
   }
   async start(id: string, actor: Actor) {
     await this.save(id, {
+      trackedAt: await this.checkIn(id),
       status: 'unavailable',
       lastCapturedAt: null,
       outsideSince: null,
@@ -114,6 +123,12 @@ export class AttendanceLocationService
     await this.store.db
       .prepare('DELETE FROM attendance_location WHERE attendance_id = ?')
       .run(id);
+  }
+  private async checkIn(id: string) {
+    const row = await this.store.db
+      .prepare('SELECT check_in FROM attendance WHERE id = ?')
+      .get(id);
+    return row ? new Date(row.check_in as string).toISOString() : null;
   }
   private async load(id: string): Promise<Tracking | null> {
     const row = await this.store.db
@@ -217,6 +232,10 @@ export class AttendanceLocationService
       throw new ConflictException(
         'Location updates must arrive in capture order',
       );
+    // States saved before tracking continuity existed start their chain at
+    // the previous capture (or check-in), matching the previous behaviour.
+    if (state.trackedAt === undefined)
+      state.trackedAt = state.lastCapturedAt ?? (await this.checkIn(id));
     // A delayed sample cannot hide a gap in reliable coverage.
     if (
       state.lastCapturedAt &&
@@ -237,12 +256,20 @@ export class AttendanceLocationService
       0.01,
     );
     state.accuracyMeters = input.accuracyMeters;
+    // Imprecise fixes neither extend nor break the chain; a long run of them
+    // breaks it through the gap check on the next reliable fix.
     if (input.accuracyMeters > trackingPolicy.maxAccuracyMeters) {
       this.unavailable(state);
       return;
     }
+    const tracked =
+      !!state.trackedAt &&
+      captured - Date.parse(state.trackedAt) <=
+        trackingPolicy.staleAfterSeconds * 1000;
+    state.trackedAt = tracked ? state.lastCapturedAt : null;
     if (state.distanceMeters + input.accuracyMeters <= policy.radiusMeters) {
       state.status = 'inside';
+      state.trackedAt = state.lastCapturedAt;
       state.outsideSince = null;
       state.returnBy = null;
     } else if (
@@ -250,7 +277,15 @@ export class AttendanceLocationService
       policy.radiusMeters
     ) {
       state.status = 'outside';
-      if (!state.outsideSince) state.outsideSince = new Date(now).toISOString();
+      // Coverage broke after the employee was last known to be inside, so the
+      // real departure time is unknown. Starting a countdown now would close
+      // attendance at "now + grace" and credit the whole absence as work.
+      // Leave attendance open for the forgotten check-out / HR correction flow.
+      if (!tracked) {
+        state.outsideSince = null;
+        state.returnBy = null;
+      } else if (!state.outsideSince)
+        state.outsideSince = new Date(now).toISOString();
       else if (
         !state.returnBy &&
         now - Date.parse(state.outsideSince) >=
@@ -314,7 +349,7 @@ export class AttendanceLocationService
     });
   }
   private publicState(state: Tracking) {
-    const { actor: _actor, ...result } = state;
+    const { actor: _actor, trackedAt: _trackedAt, ...result } = state;
     return result;
   }
 }

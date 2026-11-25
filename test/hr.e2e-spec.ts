@@ -387,6 +387,54 @@ describe('HR REST API', () => {
     const resumed = (await locationUpdate(record.id).expect(201)).body;
     expect(resumed.returnBy).toBeNull();
   });
+  it('does not credit an unobserved absence when tracking resumes outside after a rejected check-out', async () => {
+    const record = (
+      await submit('/api/attendance/check-in', employeeToken).expect(201)
+    ).body;
+    const processor = app.get(AttendanceLocationService);
+    const checkOut = async () =>
+      (
+        await app
+          .get(DatabaseService)
+          .db.prepare('SELECT check_out FROM attendance WHERE id = ?')
+          .get(record.id)
+      )?.check_out;
+    await locationUpdate(record.id, { latitude: 30.023092 }).expect(201);
+    // The employee leaves while the phone stops reporting, then returns to
+    // the app two hours later, away from the office, to check out.
+    vi.setSystemTime(new Date('2026-10-04T09:00:00Z'));
+    await processor.sweep();
+    await submit(`/api/attendance/${record.id}/check-out`, employeeToken, {
+      latitude: '30.03',
+    }).expect(403);
+    expect(await checkOut()).toBeNull();
+    // Opening the app resumes monitoring with fresh outside readings.
+    for (let seconds = 10; seconds <= 600; seconds += 30) {
+      vi.setSystemTime(
+        new Date(Date.parse('2026-10-04T09:00:00Z') + seconds * 1000),
+      );
+      expect(
+        (await locationUpdate(record.id, { latitude: 30.03 }).expect(201)).body,
+      ).toMatchObject({
+        status: 'outside',
+        outsideSince: null,
+        returnBy: null,
+      });
+      await processor.sweep();
+    }
+    // Previously this closed attendance at 09:05:40, crediting the absence.
+    expect(await checkOut()).toBeNull();
+    // A reliable return inside restores normal departure monitoring.
+    vi.setSystemTime(new Date('2026-10-04T09:10:30Z'));
+    await locationUpdate(record.id, { latitude: 30.023092 }).expect(201);
+    vi.setSystemTime(new Date('2026-10-04T09:11:00Z'));
+    await locationUpdate(record.id, { latitude: 30.03 }).expect(201);
+    vi.setSystemTime(new Date('2026-10-04T09:11:30Z'));
+    expect(
+      (await locationUpdate(record.id, { latitude: 30.03 }).expect(201)).body
+        .returnBy,
+    ).toBe('2026-10-04T09:16:30.000Z');
+  });
   it('rolls back automatic checkout if the audit fails and clears monitoring on HR correction', async () => {
     const record = (
       await submit('/api/attendance/check-in', employeeToken).expect(201)
@@ -1875,9 +1923,7 @@ describe('HR REST API', () => {
       ).body.items,
     ).toHaveLength(0);
     await request(server())
-      .patch(
-        `/api/notifications/${encodeURIComponent(missing[0].id)}/read`,
-      )
+      .patch(`/api/notifications/${encodeURIComponent(missing[0].id)}/read`)
       .set(auth(adminToken))
       .send({})
       .expect(200);
