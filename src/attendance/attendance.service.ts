@@ -24,6 +24,8 @@ import { arrivalExcuseMinutes } from './arrival-excuses.js';
 import {
   arrivalStatus,
   attendanceStatus,
+  localTime,
+  minutes,
   shiftDate,
   weekday,
   workDate,
@@ -565,6 +567,18 @@ export class AttendanceService {
       throw new BadRequestException(
         'Times must be in the past, and check-out must follow check-in',
       );
+    if (mode === 'check-out-only' && checkOut) {
+      const checkoutDate = localTime(new Date(checkOut), record.timezone).date;
+      const overnight =
+        minutes(record.schedule.end) < minutes(record.schedule.start);
+      const lastDate = overnight
+        ? shiftDate(record.workDate, 1)
+        : record.workDate;
+      if (checkoutDate < record.workDate || checkoutDate > lastDate)
+        throw new BadRequestException(
+          'Check-out date must match the attendance date. Overnight shifts also allow the next day.',
+        );
+    }
     if (
       mode !== 'check-out-only' &&
       workDate(new Date(checkIn), record.schedule, record.timezone) !==
